@@ -49,8 +49,14 @@ pyMC_Core provides the fundamental building blocks for mesh network communicatio
 Install pyMC_Core from PyPI:
 
 ```bash
-pip install pymc_core (not ready yet)
+pip install pymc_core
 ```
+
+> **Note**: For most practical applications, you'll want to install with hardware support for radio communication:
+> ```bash
+> pip install pymc_core[radio,hardware]
+> ```
+> The base package provides protocol and packet handling capabilities, but hardware integration is required for mesh communication.
 
 ### Installation from Source
 
@@ -128,7 +134,9 @@ await node.start()
 
 ## Acknowledgements
 
-- [MeshCore](https://github.com/meshcore-dev) for the original C++ implementation
+- Thanks to [MeshCore](https://github.com/meshcore-dev) for the original C++ implementation.  
+- Appreciation to **@scott_33238**, **@liamcottle**, **@recrof**, and **@cheaporeps** on Discord
+  for their ongoing help and patience with my questions. 
 - Waveshare LoRaRF library, modified to use modern `gpiozero` library (`DigitalInputDevice` and `DigitalOutputDevice`) for all GPIO operations, replacing legacy RPi.GPIO methods for compatibility across all recent Raspberry Pi models (Zero, 3, 4, 5)
 - Contributors and third-party libraries (see `pyproject.toml`)
 
