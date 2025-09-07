@@ -8,7 +8,7 @@ repo_url: https://github.com/rightup/pyMC_Core
 edit_uri: edit/main/            # enables “Edit this page” button
 
 # (Optional, recommended) Public site URL if you use GitHub Pages
-site_url: https://rightup.github.io/pyMC_Core/
+site_url: https://rightup.github.io/pyMC_core/
 
 theme:
   name: material
