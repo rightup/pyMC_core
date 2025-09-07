@@ -1,0 +1,105 @@
+site_name: pyMC_Core Documentation
+site_description: Documentation for the pyMC_Core – A Python MeshCore library with SPI LoRa radio support
+site_author: pyMC Team
+
+# Repository
+repo_name: pyMC_Core
+repo_url: https://github.com/rightup/pyMC_Core
+edit_uri: edit/main/            # enables “Edit this page” button
+
+# (Optional, recommended) Public site URL if you use GitHub Pages
+site_url: https://rightup.github.io/pyMC_Core/
+
+theme:
+  name: material
+  logo: images/PyMC.svg
+  favicon: images/favicon.ico
+  features:
+    - content.code.copy
+    - content.code.select
+    - navigation.instant
+    - navigation.tracking
+    - navigation.tabs
+    - navigation.expand
+    - toc.follow
+    - toc.integrate
+    - content.action.edit       # “Edit this page”
+    - content.action.view       # “View source”
+    - search.suggest
+    - search.highlight
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: custom           # use CSS variables from extra_css
+      accent: custom
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: custom
+      accent: custom
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+
+# Load our brand colours (defines the CSS variables Material reads)
+extra_css:
+  - styles/brand.css
+
+# Plugins
+plugins:
+  - search
+  - autorefs
+  - git-revision-date-localized:
+      enable_creation_date: true
+      type: timeago
+  - mkdocstrings:
+      handlers:
+        python:
+          paths: ["../src"]  # Add the src directory to Python path
+          options:
+            docstring_style: google
+            show_source: false
+            show_root_heading: true
+            show_symbol_type_heading: true
+            show_symbol_type_toc: true
+            show_signature: true
+            separate_signature: true
+            merge_init_into_class: true
+
+# Markdown extensions
+markdown_extensions:
+  - admonition
+  - attr_list
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.superfences
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.details
+  # Emoji support (commented out due to YAML validation issues)
+  # - pymdownx.emoji:
+  #     emoji_index: !!python/name:material.extensions.emoji.twemoji
+  #     emoji_generator: !!python/name:material.extensions.emoji.to_svg
+  - pymdownx.magiclink           # auto-link PRs/issues/commits
+
+# Navigation
+nav:
+  - Home: index.md
+  - Node Usage Guide: node.md
+  - API Reference:
+      - Core: api/core.md
+      - Protocol: api/protocol.md
+      - Node: api/node.md
+      - Dispatcher: api/dispatcher.md
+  - Examples: examples.md
+  - Contributing: contributing.md

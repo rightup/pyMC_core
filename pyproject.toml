@@ -1,0 +1,106 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pymc_core"
+version = "1.0.0"
+authors = [
+    {name = "Lloyd Newton", email = "lloyd@rightup.co.uk"},
+]
+description = "A Python MeshCore library with SPI LoRa radio support"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.8"
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Communications",
+    "Topic :: System :: Networking",
+]
+keywords = ["mesh", "networking", "lora", "radio", "iot", "communication"]
+dependencies = [
+    "pycryptodome>=3.23.0",
+    "PyNaCl>=1.5.0",
+    "pyyaml>=6.0.0",
+]
+
+[project.optional-dependencies]
+radio = ["pyserial>=3.5"]
+hardware = [
+    "gpiozero>=2.0.0",
+    "lgpio>=0.2.0",
+    "spidev>=3.5",
+]
+websocket = [
+    "websockets>=11.0.0",
+]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-cov>=4.0.0",
+    "pytest-asyncio>=0.21.0",
+    "black>=23.0.0",
+    "isort>=5.12.0",
+    "flake8>=6.0.0",
+    "mypy>=1.0.0",
+    "pre-commit>=3.0.0",
+]
+docs = [
+    "mkdocs>=1.5.0",
+    "mkdocs-material>=9.0.0",
+    "mkdocs-git-revision-date-localized-plugin>=1.2.0",
+    "mkdocs-git-committers-plugin-2>=1.2.0",
+]
+all = ["pymc_core[hardware,websocket,dev,docs]"]
+
+[project.urls]
+Homepage = "https://github.com/rightup/pyMC_core"
+Documentation = "https://rightup.github.io/rightup/pyMC_core"
+Repository = "https://github.com/rightup/pyMC_core.git"
+Issues = "https://github.com/rightup/pyMC_core/issues"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["pymc_core*"]
+exclude = ["__pycache__*", "*.pyc", "*.pyo"]
+
+[tool.black]
+line-length = 100
+target-version = ['py38']
+
+[tool.isort]
+profile = "black"
+line_length = 100
+
+[tool.flake8]
+max-line-length = 100
+extend-ignore = ["E203", "W503"]
+exclude = [
+    "src/pymc_core/hardware/lora/",
+    "examples/",
+    "__pycache__",
+    ".git",
+    ".tox",
+    "dist",
+    "*.egg-info"
+]
+
+[tool.pytest.ini_options]
+minversion = "7.0"
+addopts = "-ra -q"
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+asyncio_mode = "auto"

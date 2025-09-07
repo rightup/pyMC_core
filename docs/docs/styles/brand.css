@@ -1,0 +1,32 @@
+/* Light mode */
+:root {
+  /* Primary brand colour (nav bar, active items) */
+  --md-primary-fg-color:        #19212D;
+  --md-primary-fg-color--light: #2a3443;
+  --md-primary-fg-color--dark:  #0f141b;
+
+  /* Accent colour (buttons, highlights). Adjust to taste. */
+  --md-accent-fg-color:         #1e88e5;
+  --md-accent-fg-color--transparent: rgba(30, 136, 229, 0.12);
+
+  /* Content link colour for light mode */
+  --md-typeset-a-color: #1e88e5;
+}
+
+/* Dark mode */
+[data-md-color-scheme="slate"] {
+  --md-primary-fg-color:        #19212D;
+  --md-primary-fg-color--light: #2a3443;
+  --md-primary-fg-color--dark:  #0f141b;
+
+  --md-accent-fg-color:         #64b5f6;
+  --md-accent-fg-color--transparent: rgba(100, 181, 246, 0.15);
+
+  /* Content link colour for dark mode - bright blue that's visible */
+  --md-typeset-a-color: #90caf9;
+}
+
+/* Optional: tidy logo sizing on the header bar */
+.md-header__button.md-logo img {
+  height: 1.6rem;
+}
