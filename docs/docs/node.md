@@ -31,7 +31,7 @@ This guide references working examples from the `examples/` directory:
 - **`send_channel_message.py`**: Send messages to group channels
 - **`ping_repeater_trace.py`**: Network diagnostics using trace packets
 
-All examples use the `common.py` utilities for shared setup and support both Waveshare HAT and uConsole radio configurations.
+All examples use the `common.py` utilities for shared setup and support Waveshare HAT, uConsole radio, and meshadv-mini configurations.
 
 ### Running Examples
 
@@ -45,6 +45,11 @@ python examples/send_text_message.py
 python examples/send_flood_advert.py uconsole
 python examples/send_direct_advert.py uconsole
 python examples/send_text_message.py uconsole
+
+# Run examples with meshadv-mini radio
+python examples/send_flood_advert.py meshadv-mini
+python examples/send_direct_advert.py meshadv-mini
+python examples/send_text_message.py meshadv-mini
 ```
 
 ## Radio Setup
@@ -135,6 +140,49 @@ radio = SX1262Radio(
 radio.begin()
 ```
 
+### meshadv and meshadv-mini LoRaWAN/GNSS HAT
+
+The meshadv and meshadv-mini are available from FrequencyLabs, and are open source hardware.  They're based on the E22-900M22S module.  The Meshadv has the same pinout (more or less) as the waveshare module, but the meshadv mini is slightly different, so it needs its own definition file.  The documentation for the meshadv and meshadv Mini are available on [github](https://github.com/chrismyers2000)
+
+**Hardware Setup:**
+1. Connect the HAT to Raspberry Pi 40PIN GPIO header
+2. Ensure SPI interface is enabled in Raspberry Pi configuration
+3. Install required GPIO library: `sudo apt install python3-rpi.lgpio`
+
+**Pin Configuration (Raspberry Pi):**
+- SPI Bus: SPI0 (MOSI, MISO, SCLK pins)
+- CS: GPIO 21
+- Reset: GPIO 18
+- Busy: GPIO 20
+- IRQ (DIO1): GPIO 16
+- TXEN: GPIO 6
+- RXEN: Connected to DIO2 (not used directly)
+
+```python
+from pymc_core.hardware.sx1262_wrapper import SX1262Radio
+
+# meshadv-mini HAT configuration (matches official pinout)
+radio = SX1262Radio(
+    bus_id=0,           # SPI bus 0
+    cs_id=0,            # SPI chip select 0
+    cs_pin=8,           # CS pin (GPIO 8)
+    reset_pin=24,       # Reset pin (GPIO 24)
+    busy_pin=20,        # Busy pin (GPIO 20)
+    irq_pin=16,         # Interrupt pin (GPIO 16)
+    txen_pin=-1,        # TX enable not connected
+    rxen_pin=12,        # RX enable pin (GPIO 12)
+    frequency=910525000, # 910.525 MHz (US standard)
+    tx_power=22,        # 22 dBm
+    spreading_factor=7, # Spreading factor
+    bandwidth=62500,   # 250 kHz
+    coding_rate=5,      # 4/5 coding rate
+    preamble_length=17  # Preamble length
+)
+
+# Initialize the radio
+radio.begin()
+```
+
 ### Alternative Radio Configuration
 
 For custom hardware setups, you can customize the pin configuration:
@@ -156,22 +204,22 @@ radio.begin()
 
 ### Radio Configuration Parameters
 
-| Parameter | Description | Waveshare HAT | uConsole |
-|-----------|-------------|---------------|----------|
-| `bus_id` | SPI bus ID | 0 | 1 |
-| `cs_id` | SPI chip select ID | 0 | 0 |
-| `cs_pin` | Chip select GPIO pin | 21 | -1 |
-| `reset_pin` | Reset GPIO pin | 18 | 25 |
-| `busy_pin` | Busy GPIO pin | 20 | 24 |
-| `irq_pin` | Interrupt GPIO pin | 16 | 26 |
-| `txen_pin` | TX enable GPIO pin | 6 | -1 |
-| `rxen_pin` | RX enable GPIO pin | -1 | -1 |
-| `frequency` | Operating frequency in Hz | 869525000 (EU) | 915000000 (US) |
-| `tx_power` | Transmit power in dBm | 22 | 22 |
-| `spreading_factor` | LoRa spreading factor (7-12) | 11 | 11 |
-| `bandwidth` | Bandwidth in Hz | 250000 | 250000 |
-| `coding_rate` | Coding rate (5=4/5, 6=4/6, etc.) | 5 | 5 |
-| `preamble_length` | Preamble length | 17 | 17 |
+| Parameter          | Description                      | Waveshare HAT  | meshadv-mini        | uConsole       |
+|--------------------|----------------------------------|----------------|----------------|----------------|
+| `bus_id`           | SPI bus ID                       | 0              | 0              | 1              |
+| `cs_id`            | SPI chip select ID               | 0              | 0              | 0              |
+| `cs_pin`           | Chip select GPIO pin             | 21             | 8              | -1             |
+| `reset_pin`        | Reset GPIO pin                   | 18             | 24             | 25             |
+| `busy_pin`         | Busy GPIO pin                    | 20             | 20             | 24             |
+| `irq_pin`          | Interrupt GPIO pin               | 16             | 16             | 26             |
+| `txen_pin`         | TX enable GPIO pin               | 6              | -1             | -1             |
+| `rxen_pin`         | RX enable GPIO pin               | -1             | 12             | -1             |
+| `frequency`        | Operating frequency in Hz        | 869525000 (EU) | 910525000 (US) | 869525000 (EU) |
+| `tx_power`         | Transmit power in dBm            | 22             | 22             | 22             |
+| `spreading_factor` | LoRa spreading factor (7-12)     | 11             | 7              | 11             |
+| `bandwidth`        | Bandwidth in Hz                  | 250000         | 62500          | 250000         |
+| `coding_rate`      | Coding rate (5=4/5, 6=4/6, etc.) | 5              | 5              | 5              |
+| `preamble_length`  | Preamble length                  | 17             | 17             | 17             |
 
 **Note:** Adjust the `frequency` parameter based on your regional LoRa regulations (868MHz for EU, 915MHz for US, 433MHz for Asia).
 

@@ -84,6 +84,7 @@ python examples/send_text_message.py uconsole
 Each example script accepts an optional radio type parameter:
 - `waveshare` (default) - Waveshare SX1262 HAT
 - `uconsole` - HackerGadgets uConsole
+- `meshadv-mini` - FrequencyLabs meshadv-mini
 
 You can also run examples directly with command-line arguments:
 
@@ -101,11 +102,13 @@ Each example accepts an optional radio type parameter:
 
 - `waveshare` (default): Waveshare LoRaWAN/GNSS HAT configuration
 - `uconsole`: HackerGadgets uConsole configuration
+- `meshadv-mini`: Frequency Labs Mesh Adv
 
 ```bash
 # Examples with explicit radio type
 python examples/send_flood_advert.py waveshare
 python examples/send_flood_advert.py uconsole
+python examples/send_flood_advert.py meshadv-mini
 ```
 
 ## Hardware Requirements
@@ -131,6 +134,14 @@ pyMC_Core supports multiple SX1262-based LoRa radio modules:
 - **GPIO Pins**: CS=-1, Reset=25, Busy=24, IRQ=26
 - **Additional Setup**: Requires SPI1 overlay and GPS/RTC configuration (see uConsole setup guide)
 
+#### Frequency Labs meshadv-mini
+- **Hardware**: FrequencyLabs meshadv-mini Hat
+- **Platform**: Raspberry Pi (or compatible single-board computer)
+- **Frequency**: 868MHz (EU) or 915MHz (US)
+- **TX Power**: Up to 22dBm
+- **SPI Bus**: SPI0
+- **GPIO Pins**: CS=8, Reset=24, Busy=20, IRQ=16
+
 ### Default Pin Configurations
 
 #### Waveshare HAT
@@ -152,6 +163,16 @@ pyMC_Core supports multiple SX1262-based LoRa radio modules:
 - IRQ Pin: GPIO 26
 - TX Enable: Not used (-1)
 - RX Enable: Not used (-1)
+
+#### meshadv-mini (Frequency Labs)
+- SPI Bus: 0
+- CS ID: 0
+- CS Pin: GPIO 8
+- Busy Pin: GPIO 20
+- Reset Pin: GPIO 24
+- IRQ Pin: GPIO 16
+- TX Enable: Not used (-1)
+- RX Enable: GPIO 12
 
 ## Dependencies
 
@@ -251,6 +272,22 @@ All examples use the SX1262 LoRa radio with the following default settings:
 - **TX Enable**: Not used (-1)
 - **RX Enable**: Not used (-1)
 
+#### meshadv-mini (Frequency Labs)
+- **Radio Type**: SX1262 direct hardware control
+- **Frequency**: 869.525MHz (European standard)
+- **TX Power**: 22dBm
+- **Spreading Factor**: 11
+- **Bandwidth**: 250kHz
+- **Coding Rate**: 4/5
+- **Preamble Length**: 17 symbols
+- **SPI Bus**: 0
+- **CS Pin**: GPIO 8
+- **Reset Pin**: GPIO 24
+- **Busy Pin**: GPIO 20
+- **IRQ Pin**: GPIO 16
+- **TX Enable**: Not used (-1)
+- **RX Enable**: GPIO 12
+
 The radio configuration is hardcoded in `common.py` for simplicity and reliability.
 
 ## Hardware Setup
@@ -261,6 +298,13 @@ The radio configuration is hardcoded in `common.py` for simplicity and reliabili
 3. Install required GPIO library: `sudo apt install python3-rpi.lgpio`
 4. Remove old GPIO library if present: `sudo apt remove python3-rpi.gpio`
 5. The configuration is pre-set in `common.py` for the Waveshare HAT
+
+### Raspberry Pi with Frequency Labs meshadv-mini
+1. Connect Waveshare SX1262 HAT to Raspberry Pi 40PIN GPIO header
+2. Enable SPI interface in Raspberry Pi configuration (raspi-config)
+3. Install required GPIO library: `sudo apt install python3-rpi.lgpio`
+4. Remove old GPIO library if present: `sudo apt remove python3-rpi.gpio`
+5. The configuration is pre-set in `common.py` for the meshadv-mini
 
 ### Clockwork uConsole
 1. The uConsole has the SX1262 radio pre-integrated
