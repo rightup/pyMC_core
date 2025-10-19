@@ -60,6 +60,7 @@ class MeshNode:
 
         # Node name should be provided by app
         self.node_name = config.get("node", {}).get("name", "unknown") if config else "unknown"
+        self.radio_config = config.get("radio", {}) if config else {}
 
         self.logger = logger or logging.getLogger("MeshNode")
         self.log = self.logger
@@ -77,6 +78,7 @@ class MeshNode:
             channel_db=self.channel_db,
             event_service=self.event_service,
             node_name=self.node_name,
+            radio_config=self.radio_config,
         )
         # Store reference to text handler for command response callbacks
         self._text_handler = None
