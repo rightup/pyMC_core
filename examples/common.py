@@ -51,7 +51,7 @@ def create_radio(radio_type: str = "waveshare") -> LoRaRadio:
                 "reset_pin": 18,
                 "busy_pin": 20,
                 "irq_pin": 16,
-                "txen_pin": 13,  # GPIO 6 for TX enable
+                "txen_pin": 13,  # GPIO 13 for TX enable
                 "rxen_pin": 12,
                 "frequency": int(869.525 * 1000000),  # EU: 869.525 MHz
                 "tx_power": 22,
