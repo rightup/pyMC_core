@@ -59,6 +59,7 @@ def create_radio(radio_type: str = "waveshare") -> LoRaRadio:
                 "bandwidth": int(250 * 1000),
                 "coding_rate": 5,
                 "preamble_length": 17,
+                "is_waveshare": True,
             },
             "uconsole": {
                 "bus_id": 1,  # SPI1

@@ -126,6 +126,7 @@ class SX1262Radio(LoRaRadio):
         coding_rate: int = 5,
         preamble_length: int = 12,
         sync_word: int = 0x3444,
+        is_waveshare: bool = False,
     ):
         """
         Initialize SX1262 radio
@@ -146,6 +147,7 @@ class SX1262Radio(LoRaRadio):
             coding_rate: Coding rate (default: 5 for 4/5)
             preamble_length: Preamble length (default: 12)
             sync_word: Sync word (default: 0x3444 for public network)
+            is_waveshare: Use alternate initialization needed for Waveshare HAT
         """
         # Check if there's already an active instance and clean it up
         if SX1262Radio._active_instance is not None:
@@ -173,6 +175,7 @@ class SX1262Radio(LoRaRadio):
         self.coding_rate = coding_rate
         self.preamble_length = preamble_length
         self.sync_word = sync_word
+        self.is_waveshare = is_waveshare
 
         # State variables
         self.lora: Optional[SX126x] = None
@@ -510,7 +513,7 @@ class SX1262Radio(LoRaRadio):
                     logger.warning(f"Could not setup TXEN pin {self.txen_pin}")
 
             # Adaptive initialization based on board type
-            if self.cs_pin == 21:  # Waveshare HAT - use minimal initialization
+            if self.is_waveshare:  # Waveshare HAT - use minimal initialization
                 # Basic radio setup
                 if not self._basic_radio_setup():
                     return False
