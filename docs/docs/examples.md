@@ -300,7 +300,7 @@ The radio configuration is hardcoded in `common.py` for simplicity and reliabili
 5. The configuration is pre-set in `common.py` for the Waveshare HAT
 
 ### Raspberry Pi with Frequency Labs meshadv-mini
-1. Connect Waveshare SX1262 HAT to Raspberry Pi 40PIN GPIO header
+1. Connect Frequency Labs meshadv-mini HAT to Raspberry Pi 40PIN GPIO header
 2. Enable SPI interface in Raspberry Pi configuration (raspi-config)
 3. Install required GPIO library: `sudo apt install python3-rpi.lgpio`
 4. Remove old GPIO library if present: `sudo apt remove python3-rpi.gpio`
