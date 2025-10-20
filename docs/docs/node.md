@@ -174,7 +174,7 @@ radio = SX1262Radio(
     frequency=910525000, # 910.525 MHz (US standard)
     tx_power=22,        # 22 dBm
     spreading_factor=7, # Spreading factor
-    bandwidth=62500,   # 250 kHz
+    bandwidth=62500,   # 62.5 kHz
     coding_rate=5,      # 4/5 coding rate
     preamble_length=17  # Preamble length
 )
