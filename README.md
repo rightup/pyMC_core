@@ -78,6 +78,7 @@ For examples, see the [documentation](https://rightup.github.io/pyMC_core/exampl
 ### Supported Radios
 - **Waveshare SX1262 LoRaWAN/GNSS HAT** - Popular Raspberry Pi LoRa module
 - **HackerGadgets uConsole** - All-in-one extension board with LoRa support
+- **FrequencyLabs meshadv-mini** - Raspberry Pi hat with E22-900M22S LoRa module
 
 ### Requirements
 - Raspberry Pi (or compatible SBC)
