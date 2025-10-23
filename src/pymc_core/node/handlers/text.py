@@ -104,9 +104,12 @@ class TextMessageHandler(BaseHandler):
                 extra=ack_hash
             )
 
-         
-            ack_airtime = PacketTimingUtils.estimate_airtime_ms(len(ack_packet.write_to()), self.radio_config)
-            ack_timeout_ms = PacketTimingUtils.calc_flood_timeout_ms(ack_airtime) / 1000.0  # Convert to seconds
+            packet_len = len(ack_packet.write_to())
+            ack_airtime = PacketTimingUtils.estimate_airtime_ms(packet_len, self.radio_config)
+            ack_timeout_ms = PacketTimingUtils.calc_flood_timeout_ms(ack_airtime)
+            
+            self.log(f"FLOOD ACK timing - packet:{packet_len}B, airtime:{ack_airtime:.1f}ms, delay:{ack_timeout_ms:.1f}ms")
+            ack_timeout_ms = ack_timeout_ms / 1000.0  # Convert to seconds
 
         else:
             # DIRECT messages use discrete ACK packets
@@ -117,10 +120,12 @@ class TextMessageHandler(BaseHandler):
                 text=message_body.rstrip(b"\x00"),
             )
 
-          
-            ack_airtime = PacketTimingUtils.estimate_airtime_ms(len(ack_packet.write_to()), self.radio_config)
-            # For direct ACKs, path_len is typically 0 (direct response)
-            ack_timeout_ms = PacketTimingUtils.calc_direct_timeout_ms(ack_airtime, 0) / 1000.0  # Convert to seconds
+            packet_len = len(ack_packet.write_to())
+            ack_airtime = PacketTimingUtils.estimate_airtime_ms(packet_len, self.radio_config)
+            ack_timeout_ms = PacketTimingUtils.calc_direct_timeout_ms(ack_airtime, 0)
+            
+            self.log(f"DIRECT ACK timing - packet:{packet_len}B, airtime:{ack_airtime:.1f}ms, delay:{ack_timeout_ms:.1f}ms, radio_config:{self.radio_config}")
+            ack_timeout_ms = ack_timeout_ms / 1000.0  # Convert to seconds
 
         async def send_delayed_ack():
             await asyncio.sleep(ack_timeout_ms)

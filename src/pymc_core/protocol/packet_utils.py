@@ -156,7 +156,7 @@ class PacketDataUtils:
     @staticmethod
     def calculate_snr_db(raw_snr: int) -> float:
         """Convert raw SNR value to decibels."""
-        return raw_snr / 4.0 if raw_snr is not None else 0.0
+        return raw_snr if raw_snr is not None else 0.0
 
 
 class PacketHeaderUtils:
@@ -265,16 +265,17 @@ class PacketTimingUtils:
     def estimate_airtime_ms(packet_length_bytes: int, radio_config: dict = None) -> float:
         """
         Estimate LoRa packet airtime in milliseconds based on packet size and radio parameters.
-         
+
         Args:
             packet_length_bytes: Total packet length including headers
             radio_config: Radio configuration dict with spreading_factor, bandwidth, etc.
+                         Can include 'measured_airtime_ms' for actual measured value
             
         Returns:
             Estimated airtime in milliseconds
         """
         if radio_config is None:
-            # Default MeshCore parameters
+
             radio_config = {
                 'spreading_factor': 10,
                 'bandwidth': 250000,  # 250kHz
@@ -282,13 +283,19 @@ class PacketTimingUtils:
                 'preamble_length': 8,
             }
         
+
+        if 'measured_airtime_ms' in radio_config:
+            return radio_config['measured_airtime_ms']
+        
         sf = radio_config.get('spreading_factor', 10)
-        bw = radio_config.get('bandwidth', 250000)  # Hz
+        bw = radio_config.get('bandwidth', 250000)  # Hz or kHz - convert to Hz if needed
         cr = radio_config.get('coding_rate', 5)
         preamble = radio_config.get('preamble_length', 8)
         
-        # Simplified LoRa airtime calculation
-        # This is an approximation - real LoRa chips have more complex calculations
+        # Convert bandwidth to Hz if it's in kHz (values < 1000 are assumed to be kHz)
+        if bw < 1000:
+            bw = bw * 1000  # Convert kHz to Hz
+        
         symbol_time = (2 ** sf) / bw  # seconds per symbol
         
         # Preamble time
