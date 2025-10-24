@@ -51,14 +51,15 @@ def create_radio(radio_type: str = "waveshare") -> LoRaRadio:
                 "reset_pin": 18,
                 "busy_pin": 20,
                 "irq_pin": 16,
-                "txen_pin": 6,  # GPIO 6 for TX enable
-                "rxen_pin": -1,
+                "txen_pin": 13,  # GPIO 13 for TX enable
+                "rxen_pin": 12,
                 "frequency": int(869.525 * 1000000),  # EU: 869.525 MHz
                 "tx_power": 22,
                 "spreading_factor": 11,
                 "bandwidth": int(250 * 1000),
                 "coding_rate": 5,
                 "preamble_length": 17,
+                "is_waveshare": True,
             },
             "uconsole": {
                 "bus_id": 1,  # SPI1
@@ -76,11 +77,27 @@ def create_radio(radio_type: str = "waveshare") -> LoRaRadio:
                 "coding_rate": 5,
                 "preamble_length": 17,
             },
+            "meshadv-mini": {
+                "bus_id": 0,
+                "cs_id": 0,
+                "cs_pin": 8,
+                "reset_pin": 24,
+                "busy_pin": 20,
+                "irq_pin": 16,
+                "txen_pin": -1,
+                "rxen_pin": 12,
+                "frequency": int(910.525 * 1000000),  # US: 910.525 MHz
+                "tx_power": 22,
+                "spreading_factor": 7,
+                "bandwidth": int(62.5 * 1000),
+                "coding_rate": 5,
+                "preamble_length": 17,
+            }
         }
 
         if radio_type not in configs:
             raise ValueError(
-                f"Unknown radio type: {radio_type}. Use 'waveshare' or 'uconsole'"
+                f"Unknown radio type: {radio_type}. Use 'waveshare' 'meshadv-mini' or 'uconsole'"
             )
 
         radio_kwargs = configs[radio_type]
