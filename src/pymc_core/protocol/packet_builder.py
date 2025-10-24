@@ -169,7 +169,7 @@ class PacketBuilder:
         # Add name if present
         if final_flags & ADVERT_FLAG_HAS_NAME:
             name_bytes = name.encode("utf-8")[:31] + b"\x00"
-            buf += name_bytes.ljust(32, b"\x00")
+            buf += name_bytes
         else:
             buf += bytes(32)
 
