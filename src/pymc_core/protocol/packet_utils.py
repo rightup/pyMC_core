@@ -156,7 +156,7 @@ class PacketDataUtils:
     @staticmethod
     def calculate_snr_db(raw_snr: int) -> float:
         """Convert raw SNR value to decibels."""
-        return raw_snr / 4.0 if raw_snr is not None else 0.0
+        return raw_snr if raw_snr is not None else 0.0
 
 
 class PacketHeaderUtils:
@@ -251,8 +251,99 @@ class RouteTypeUtils:
     def get_route_type_value(route_type: str, has_routing_path: bool = False) -> int:
         """Get numeric route type value with optional transport prefix."""
         if has_routing_path:
-            return RouteTypeUtils.ROUTE_MAP.get(
-                f"transport_{route_type}", ROUTE_TYPE_TRANSPORT_FLOOD
-            )
-        else:
+            # When path is supplied, use DIRECT routing (don't use transport variants)
             return RouteTypeUtils.ROUTE_MAP.get(route_type, ROUTE_TYPE_DIRECT)
+        else:
+            # When no path supplied, use FLOOD to build path automatically  
+            return RouteTypeUtils.ROUTE_MAP.get(route_type, ROUTE_TYPE_FLOOD)
+
+
+class PacketTimingUtils:
+    """Utilities for packet transmission timing calculations."""
+
+    @staticmethod
+    def estimate_airtime_ms(packet_length_bytes: int, radio_config: dict = None) -> float:
+        """
+        Estimate LoRa packet airtime in milliseconds based on packet size and radio parameters.
+
+        Args:
+            packet_length_bytes: Total packet length including headers
+            radio_config: Radio configuration dict with spreading_factor, bandwidth, etc.
+                         Can include 'measured_airtime_ms' for actual measured value
+            
+        Returns:
+            Estimated airtime in milliseconds
+        """
+        if radio_config is None:
+
+            radio_config = {
+                'spreading_factor': 10,
+                'bandwidth': 250000,  # 250kHz
+                'coding_rate': 5,
+                'preamble_length': 8,
+            }
+        
+
+        if 'measured_airtime_ms' in radio_config:
+            return radio_config['measured_airtime_ms']
+        
+        sf = radio_config.get('spreading_factor', 10)
+        bw = radio_config.get('bandwidth', 250000)  # Hz or kHz - convert to Hz if needed
+        cr = radio_config.get('coding_rate', 5)
+        preamble = radio_config.get('preamble_length', 8)
+        
+        # Convert bandwidth to Hz if it's in kHz (values < 1000 are assumed to be kHz)
+        if bw < 1000:
+            bw = bw * 1000  # Convert kHz to Hz
+        
+        symbol_time = (2 ** sf) / bw  # seconds per symbol
+        
+        # Preamble time
+        preamble_time = preamble * symbol_time
+        
+        # Payload symbols (simplified)
+        payload_symbols = 8 + max(0, (packet_length_bytes * 8 - 4 * sf + 28) // (4 * (sf - 2))) * (cr + 4)
+        payload_time = payload_symbols * symbol_time
+        
+        total_time_ms = (preamble_time + payload_time) * 1000
+        
+        # Add some overhead for processing and turnaround
+        return max(total_time_ms, 50.0)  # Minimum 50ms
+
+    @staticmethod
+    def calc_flood_timeout_ms(packet_airtime_ms: float) -> float:
+        """
+        Calculate timeout for flood packets.
+        
+        Formula: 500ms + (16.0 × airtime)
+        
+        Args:
+            packet_airtime_ms: Estimated packet airtime in milliseconds
+            
+        Returns:
+            Timeout in milliseconds
+        """
+        SEND_TIMEOUT_BASE_MILLIS = 500
+        FLOOD_SEND_TIMEOUT_FACTOR = 16.0
+        return SEND_TIMEOUT_BASE_MILLIS + (FLOOD_SEND_TIMEOUT_FACTOR * packet_airtime_ms)
+
+    @staticmethod
+    def calc_direct_timeout_ms(packet_airtime_ms: float, path_len: int) -> float:
+        """
+        Calculate timeout for direct packets.
+        
+        Formula: 500ms + ((airtime × 6 + 250ms) × (path_len + 1))
+        
+        Args:
+            packet_airtime_ms: Estimated packet airtime in milliseconds
+            path_len: Number of hops in the path (0 for direct)
+            
+        Returns:
+            Timeout in milliseconds
+        """
+        SEND_TIMEOUT_BASE_MILLIS = 500
+        DIRECT_SEND_PERHOP_FACTOR = 6.0
+        DIRECT_SEND_PERHOP_EXTRA_MILLIS = 250
+        return SEND_TIMEOUT_BASE_MILLIS + (
+            (packet_airtime_ms * DIRECT_SEND_PERHOP_FACTOR + DIRECT_SEND_PERHOP_EXTRA_MILLIS) * (path_len + 1)
+        )

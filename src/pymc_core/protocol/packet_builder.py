@@ -642,10 +642,11 @@ class PacketBuilder:
             raise ValueError("Combined path/extra too long")
 
         inner = bytes([len(path)]) + bytes(path) + bytes([extra_type]) + extra
-        cipher = PacketBuilder._encrypt_payload(CryptoUtils.sha256(secret), secret, inner)
+        aes_key = secret[:16]
+        cipher = PacketBuilder._encrypt_payload(aes_key, secret, inner)
         payload = bytearray([dest_hash, src_hash]) + cipher
 
-        header = PacketBuilder._create_header(PAYLOAD_TYPE_PATH)
+        header = PacketBuilder._create_header(PAYLOAD_TYPE_PATH, route_type="flood", has_routing_path=False)
         return PacketBuilder._create_packet(header, payload)
 
     @staticmethod
@@ -727,51 +728,20 @@ class PacketBuilder:
 
         pkt.payload = bytearray(payload)
         pkt.payload_len = len(payload)
+        
+        # Enhanced debug logging with packet details
+        route_type_names = {0: "TRANSPORT_FLOOD", 1: "FLOOD", 2: "DIRECT", 3: "TRANSPORT_DIRECT"}
+        header_route_type = pkt.header & 0x03
+        logger.debug(f"Created TXT_MSG packet:")
+        logger.debug(f"  Header: 0x{pkt.header:02X} (route_type={header_route_type}={route_type_names.get(header_route_type, 'UNKNOWN')})")
+        logger.debug(f"  Path: {list(pkt.path)} (len={pkt.path_len})")
+        logger.debug(f"  Payload: {len(pkt.payload)} bytes, first 10: {list(pkt.payload[:10])}")
+        logger.debug(f"  Message: '{message}', attempt={attempt}, timestamp={timestamp}")
+        logger.debug(f"  CRC: 0x{ack_crc:08X}")
+        
         return pkt, ack_crc
-        attempt &= 0x03
-        timestamp = PacketBuilder._get_timestamp()
+        
 
-        # Use  timestamp+data packing
-        plaintext = PacketBuilder._pack_timestamp_data(timestamp, attempt, message, b"\x00")
-
-        # Use  encryption and payload creation
-        payload, shared_secret, aes_key = PacketBuilder._create_encrypted_payload(
-            contact, local_identity, plaintext
-        )
-
-        # Calculate CRC using centralized packing
-        crc_input = PacketBuilder._pack_timestamp_data(timestamp, attempt, message)
-        ack_crc = int.from_bytes(
-            CryptoUtils.sha256(crc_input + local_identity.get_public_key())[:4],
-            "little",
-        )
-
-        # Use  path validation
-        routing_path = (
-            out_path if out_path is not None else (contact.out_path if contact.out_path else [])
-        )
-        routing_path = PacketBuilder._validate_routing_path(routing_path)
-
-        # Create packet with validated path
-        pkt = Packet()
-        has_path = bool(routing_path and len(routing_path) > 0)
-        pkt.header = PacketBuilder._create_header(PAYLOAD_TYPE_TXT_MSG, message_type, has_path)
-
-        if routing_path and len(routing_path) > 0:
-            if len(routing_path) > MAX_PATH_SIZE:
-                logger.warning(
-                    f"Path length {len(routing_path)} exceeds maximum {MAX_PATH_SIZE}, truncating"
-                )
-                routing_path = routing_path[:MAX_PATH_SIZE]
-
-            pkt.path = bytearray(routing_path)
-            pkt.path_len = len(pkt.path)
-        else:
-            pkt.path_len, pkt.path = 0, bytearray()
-
-        pkt.payload = bytearray(payload)
-        pkt.payload_len = len(payload)
-        return pkt, ack_crc
 
     @staticmethod
     def create_protocol_request(
