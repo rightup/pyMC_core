@@ -148,6 +148,7 @@ class Dispatcher:
         channel_db=None,
         event_service=None,
         node_name=None,
+        radio_config=None,
     ) -> None:
         """Quick setup for all the standard packet handlers."""
         # Keep our identity handy for detecting our own packets
@@ -171,6 +172,7 @@ class Dispatcher:
             self._log,
             self.send_packet,
             event_service,
+            radio_config,
         )
         # Keep a reference so the node can use it
         self.text_message_handler = text_message_handler
