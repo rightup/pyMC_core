@@ -61,7 +61,7 @@ if __name__ == "__main__":
     # Parse command line arguments
     radio_type = sys.argv[1] if len(sys.argv) > 1 else "waveshare"
 
-    if radio_type not in ["waveshare", "uconsole", 'meshadv-mini']:
+    if radio_type not in ["waveshare", "uconsole", "meshadv-mini"]:
         print("Usage: python send_flood_advert.py [waveshare|uconsole|meshadv-mini]")
         sys.exit(1)
 

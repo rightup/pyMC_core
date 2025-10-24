@@ -92,7 +92,7 @@ def create_radio(radio_type: str = "waveshare") -> LoRaRadio:
                 "bandwidth": int(62.5 * 1000),
                 "coding_rate": 5,
                 "preamble_length": 17,
-            }
+            },
         }
 
         if radio_type not in configs:
@@ -136,9 +136,7 @@ def create_mesh_node(
         # Create a local identity (this generates a new keypair)
         logger.debug("Creating LocalIdentity...")
         identity = LocalIdentity()
-        logger.info(
-            f"Created identity with public key: {identity.get_public_key().hex()[:16]}..."
-        )
+        logger.info(f"Created identity with public key: {identity.get_public_key().hex()[:16]}...")
 
         # Create the SX1262 radio
         logger.debug("Creating radio...")

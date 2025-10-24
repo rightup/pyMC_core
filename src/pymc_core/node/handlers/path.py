@@ -67,9 +67,7 @@ class PathHandler:
                         self._dispatcher.packet_analysis_callback(pkt)
                         self._log("PATH packet analysis delegated to app")
                 else:
-                    self._log(
-                        "PATH packet received - hop analysis requires app-level analyzer"
-                    )
+                    self._log("PATH packet received - hop analysis requires app-level analyzer")
 
             except Exception as e:
                 self._log(f"PATH packet analysis failed: {e}")
@@ -79,9 +77,7 @@ class PathHandler:
                 payload = pkt.get_payload()
                 if len(payload) >= 2:
                     hop_count = payload[1]
-                    self._log(
-                        f"PATH packet: hop_count={hop_count}, payload_len={len(payload)}"
-                    )
+                    self._log(f"PATH packet: hop_count={hop_count}, payload_len={len(payload)}")
                     self._log(f"Path contains {hop_count} hops")
                 else:
                     self._log("PATH packet received with minimal payload")
@@ -96,9 +92,7 @@ class PathHandler:
 
                     # Extract route type from packet header if possible
                     # This is a simplified version without full analysis
-                    self._log(
-                        "PATH packet routing analysis requires app-level analyzer"
-                    )
+                    self._log("PATH packet routing analysis requires app-level analyzer")
                 except ImportError:
                     pass
 

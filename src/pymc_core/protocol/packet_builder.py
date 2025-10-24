@@ -509,7 +509,7 @@ class PacketBuilder:
 
         channel = next((ch for ch in channels_config if ch.get("name") == group_name), None)
         if not channel:
-            raise ValueError(f"Channel '{group_name}' not found in provided channels_config")
+            raise ValueError(f"Channel '{group_name}' not in provided channels_config")
 
         secret_bytes = (
             bytes.fromhex(channel["secret"])
@@ -646,7 +646,9 @@ class PacketBuilder:
         cipher = PacketBuilder._encrypt_payload(aes_key, secret, inner)
         payload = bytearray([dest_hash, src_hash]) + cipher
 
-        header = PacketBuilder._create_header(PAYLOAD_TYPE_PATH, route_type="flood", has_routing_path=False)
+        header = PacketBuilder._create_header(
+            PAYLOAD_TYPE_PATH, route_type="flood", has_routing_path=False
+        )
         return PacketBuilder._create_packet(header, payload)
 
     @staticmethod
@@ -728,20 +730,21 @@ class PacketBuilder:
 
         pkt.payload = bytearray(payload)
         pkt.payload_len = len(payload)
-        
+
         # Enhanced debug logging with packet details
         route_type_names = {0: "TRANSPORT_FLOOD", 1: "FLOOD", 2: "DIRECT", 3: "TRANSPORT_DIRECT"}
         header_route_type = pkt.header & 0x03
-        logger.debug(f"Created TXT_MSG packet:")
-        logger.debug(f"  Header: 0x{pkt.header:02X} (route_type={header_route_type}={route_type_names.get(header_route_type, 'UNKNOWN')})")
+        logger.debug("Created TXT_MSG packet:")
+        logger.debug(
+            f"  Header: 0x{pkt.header:02X} (route_type={header_route_type}="
+            f"{route_type_names.get(header_route_type, 'UNKNOWN')})"
+        )
         logger.debug(f"  Path: {list(pkt.path)} (len={pkt.path_len})")
         logger.debug(f"  Payload: {len(pkt.payload)} bytes, first 10: {list(pkt.payload[:10])}")
         logger.debug(f"  Message: '{message}', attempt={attempt}, timestamp={timestamp}")
         logger.debug(f"  CRC: 0x{ack_crc:08X}")
-        
-        return pkt, ack_crc
-        
 
+        return pkt, ack_crc
 
     @staticmethod
     def create_protocol_request(

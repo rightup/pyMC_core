@@ -50,9 +50,7 @@ async def ping_repeater(radio_type: str = "waveshare"):
     trace_handler = mesh_node.dispatcher.trace_handler
     if trace_handler:
         # Use the target repeater's hash for the callback
-        repeater_hash_hex = (
-            "b5d8df576ee9ab9ba4e71dc3ef753c6383f1215306139b0cc3bb2c02136d7f65"
-        )
+        repeater_hash_hex = "b5d8df576ee9ab9ba4e71dc3ef753c6383f1215306139b0cc3bb2c02136d7f65"
         repeater_pubkey_hash = bytes.fromhex(repeater_hash_hex)
         repeater_hash = repeater_pubkey_hash[0]
 

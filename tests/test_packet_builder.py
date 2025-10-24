@@ -11,9 +11,7 @@ def test_packet_builder_create_ack():
     attempt = 1
     text = "test_ack"
 
-    ack_packet = PacketBuilder.create_ack(
-        identity.get_public_key(), timestamp, attempt, text
-    )
+    ack_packet = PacketBuilder.create_ack(identity.get_public_key(), timestamp, attempt, text)
 
     assert ack_packet is not None
     assert ack_packet.get_payload_type() == PAYLOAD_TYPE_ACK

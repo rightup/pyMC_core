@@ -180,7 +180,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 - [Documentation](https://rightup.github.io/pyMC_core/)
 - [Issues](https://github.com/rightup/pyMC_Core/issues)
 - [Discussions](https://github.com/rightup/pyMC_Core/discussions)
-- [Meshcore Discord](https://discord.com/channels/1343693475589263471/1343693475589263474)
+- [Meshcore Discord](https://discord.gg/fThwBrRc3Q)
 
 ---
 

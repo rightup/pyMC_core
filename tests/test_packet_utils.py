@@ -86,9 +86,7 @@ class TestPacketValidationUtils:
             PacketValidationUtils.validate_buffer_lengths(5, 6, 10, 10)
 
         # Invalid payload length
-        with pytest.raises(
-            ValueError, match="payload_len mismatch: expected 10, got 15"
-        ):
+        with pytest.raises(ValueError, match="payload_len mismatch: expected 10, got 15"):
             PacketValidationUtils.validate_buffer_lengths(5, 5, 10, 15)
 
     def test_validate_payload_size(self):

@@ -46,9 +46,7 @@ class EventService:
         if event_type in self._subscribers:
             try:
                 self._subscribers[event_type].remove(subscriber)
-                self.logger.debug(
-                    f"Unsubscribed {subscriber.__class__.__name__} from {event_type}"
-                )
+                self.logger.debug(f"Unsubscribed {subscriber.__class__.__name__} from {event_type}")
             except ValueError:
                 pass
 
@@ -56,9 +54,7 @@ class EventService:
         """Unsubscribe from all events."""
         try:
             self._global_subscribers.remove(subscriber)
-            self.logger.debug(
-                f"Removed global subscriber {subscriber.__class__.__name__}"
-            )
+            self.logger.debug(f"Removed global subscriber {subscriber.__class__.__name__}")
         except ValueError:
             pass
 
@@ -72,9 +68,7 @@ class EventService:
                 try:
                     await subscriber.handle_event(event_type, data)
                 except Exception as e:
-                    self.logger.error(
-                        f"Error in subscriber {subscriber.__class__.__name__}: {e}"
-                    )
+                    self.logger.error(f"Error in subscriber {subscriber.__class__.__name__}: {e}")
 
         # Notify global subscribers
         for subscriber in self._global_subscribers:

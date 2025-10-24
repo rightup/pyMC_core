@@ -1,11 +1,7 @@
 import time
 
 from ...protocol import Packet, decode_appdata
-from ...protocol.constants import (
-    PAYLOAD_TYPE_ADVERT,
-    PUB_KEY_SIZE,
-    describe_advert_flags,
-)
+from ...protocol.constants import PAYLOAD_TYPE_ADVERT, PUB_KEY_SIZE, describe_advert_flags
 from ...protocol.utils import determine_contact_type_from_flags
 from .base import BaseHandler
 
@@ -29,9 +25,7 @@ class AdvertHandler(BaseHandler):
 
         if self.contacts is not None:
             self.log(f"Processing advert for pubkey: {pubkey_hex}")
-            contact = next(
-                (c for c in self.contacts.contacts if c.public_key == pubkey_hex), None
-            )
+            contact = next((c for c in self.contacts.contacts if c.public_key == pubkey_hex), None)
             if contact:
                 self.log(f"Peer identity already known: {contact.name}")
                 contact.last_advert = int(time.time())
@@ -45,9 +39,7 @@ class AdvertHandler(BaseHandler):
 
                 # Require valid name - ignore packet if no name present
                 if not name:
-                    self.log(
-                        f"Ignoring advert packet without name (pubkey={pubkey_hex[:8]}...)"
-                    )
+                    self.log(f"Ignoring advert packet without name (pubkey={pubkey_hex[:8]}...)")
                     return
 
                 self.log(f"Processing contact with name: {name}")
@@ -74,10 +66,6 @@ class AdvertHandler(BaseHandler):
                     try:
                         from ..events import MeshEvents
 
-                        self.event_service.publish_sync(
-                            MeshEvents.NEW_CONTACT, new_contact_data
-                        )
+                        self.event_service.publish_sync(MeshEvents.NEW_CONTACT, new_contact_data)
                     except Exception as broadcast_error:
-                        self.log(
-                            f"Failed to publish new contact event: {broadcast_error}"
-                        )
+                        self.log(f"Failed to publish new contact event: {broadcast_error}")

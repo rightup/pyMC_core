@@ -67,9 +67,9 @@ from .packet_utils import (
     PacketDataUtils,
     PacketHashingUtils,
     PacketHeaderUtils,
+    PacketTimingUtils,
     PacketValidationUtils,
     RouteTypeUtils,
-    PacketTimingUtils
 )
 from .utils import decode_appdata, parse_advert_payload
 

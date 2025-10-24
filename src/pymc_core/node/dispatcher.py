@@ -60,17 +60,11 @@ class Dispatcher:
         self.tx_delay = tx_delay
         self.state: DispatcherState = DispatcherState.IDLE
 
-        self.packet_received_callback: Optional[
-            Callable[[Packet], Awaitable[None] | None]
-        ] = None
-        self.packet_sent_callback: Optional[
-            Callable[[Packet], Awaitable[None] | None]
-        ] = None
+        self.packet_received_callback: Optional[Callable[[Packet], Awaitable[None] | None]] = None
+        self.packet_sent_callback: Optional[Callable[[Packet], Awaitable[None] | None]] = None
 
         # Add raw packet callback for detailed logging
-        self.raw_packet_callback: Optional[
-            Callable[[Packet, bytes], Awaitable[None] | None]
-        ] = None
+        self.raw_packet_callback: Optional[Callable[[Packet, bytes], Awaitable[None] | None]] = None
 
         self._handlers: dict[int, Any] = {}  # Keep track of packet handlers
         self._handler_instances: dict[
@@ -194,16 +188,12 @@ class Dispatcher:
             ),
         )
         # Protocol response handler for encrypted responses (including telemetry)
-        protocol_response_handler = ProtocolResponseHandler(
-            self._log, local_identity, contacts
-        )
+        protocol_response_handler = ProtocolResponseHandler(self._log, local_identity, contacts)
         # Keep a reference for the node
         self.protocol_response_handler = protocol_response_handler
 
         # Login response handler for PAYLOAD_TYPE_RESPONSE packets
-        login_response_handler = LoginResponseHandler(
-            local_identity, contacts, self._log
-        )
+        login_response_handler = LoginResponseHandler(local_identity, contacts, self._log)
         # Connect protocol response handler for forwarding telemetry
         login_response_handler.set_protocol_response_handler(protocol_response_handler)
         # Keep references for backward compatibility
@@ -272,9 +262,7 @@ class Dispatcher:
         is_own = src_hash == our_hash
 
         if is_own:
-            self._log(
-                f"Own packet detected: src_hash={src_hash:02X}, our_hash={our_hash:02X}"
-            )
+            self._log(f"Own packet detected: src_hash={src_hash:02X}, our_hash={our_hash:02X}")
 
         return is_own
 
@@ -308,9 +296,7 @@ class Dispatcher:
 
     async def _process_received_packet(self, data: bytes) -> None:
         """Process a received packet from the radio callback."""
-        self._log(
-            f"[RX DEBUG] Processing packet: {len(data)} bytes, data: {data.hex()[:32]}..."
-        )
+        self._log(f"[RX DEBUG] Processing packet: {len(data)} bytes, data: {data.hex()[:32]}...")
 
         # Generate packet hash for deduplication and blacklist checking
         packet_hash = self.packet_filter.generate_hash(data)
@@ -362,9 +348,7 @@ class Dispatcher:
 
         # Always call raw packet callback first for logging (regardless of source)
         if self.raw_packet_callback:
-            await self._invoke_enhanced_raw_callback(
-                self.raw_packet_callback, pkt, data, {}
-            )
+            await self._invoke_enhanced_raw_callback(self.raw_packet_callback, pkt, data, {})
             self._log("[RX DEBUG] Raw packet callback completed")
 
         # Check if this is our own packet before processing handlers
@@ -375,9 +359,7 @@ class Dispatcher:
             self._log(
                 "   This suggests your packet was repeated by another node and came back to you!"
             )
-            self._log(
-                f"Ignoring own packet (type={pkt.header >> 4:02X}) to prevent loops"
-            )
+            self._log(f"Ignoring own packet (type={pkt.header >> 4:02X}) to prevent loops")
             return
 
         # Handle ACK matching for waiting senders
@@ -425,12 +407,8 @@ class Dispatcher:
             return False
         # Log what we sent
         type_name = PAYLOAD_TYPES.get(payload_type, f"UNKNOWN_{payload_type}")
-        route_name = ROUTE_TYPES.get(
-            packet.get_route_type(), f"UNKNOWN_{packet.get_route_type()}"
-        )
-        self._log(
-            f"TX {packet.get_raw_length()} bytes (type={type_name}, route={route_name})"
-        )
+        route_name = ROUTE_TYPES.get(packet.get_route_type(), f"UNKNOWN_{packet.get_route_type()}")
+        self._log(f"TX {packet.get_raw_length()} bytes (type={type_name}, route={route_name})")
 
         if self.packet_sent_callback:
             await self._invoke_callback(self.packet_sent_callback, packet)
@@ -458,9 +436,7 @@ class Dispatcher:
 
         try:
             # Wait for the ACK using the event-based system
-            ack_received = await self.wait_for_ack(
-                self._current_expected_crc, ACK_TIMEOUT
-            )
+            ack_received = await self.wait_for_ack(self._current_expected_crc, ACK_TIMEOUT)
             if ack_received:
                 self._log(f"[>>acK] received for CRC {self._current_expected_crc:08X}")
                 return True
@@ -505,13 +481,9 @@ class Dispatcher:
         type_name = PAYLOAD_TYPES.get(payload_type, f"UNKNOWN_{payload_type}")
         self._log(f"RX {type_name} ({payload_type})")
 
-        self._logger.debug(
-            f"Received packet type {type_name}, payload length: {pkt.payload_len}"
-        )
+        self._logger.debug(f"Received packet type {type_name}, payload length: {pkt.payload_len}")
         if pkt.payload_len > 0:
-            self._logger.debug(
-                f"Payload preview: {pkt.payload[:min(10, pkt.payload_len)].hex()}"
-            )
+            self._logger.debug(f"Payload preview: {pkt.payload[:min(10, pkt.payload_len)].hex()}")
 
         handler = self._get_handler(payload_type)
         if not handler:
@@ -547,9 +519,7 @@ class Dispatcher:
         while True:
             # Clean out old ACK CRCs (older than 5 seconds)
             now = asyncio.get_event_loop().time()
-            self._recent_acks = {
-                crc: ts for crc, ts in self._recent_acks.items() if now - ts < 5
-            }
+            self._recent_acks = {crc: ts for crc, ts in self._recent_acks.items() if now - ts < 5}
 
             # Clean old packet hashes for deduplication
             self.packet_filter.cleanup_old_hashes()

@@ -193,9 +193,7 @@ class TestPathHandler:
         self.log_fn = MagicMock()
         self.ack_handler = AckHandler(self.log_fn)
         self.protocol_response_handler = MagicMock()
-        self.handler = PathHandler(
-            self.log_fn, self.ack_handler, self.protocol_response_handler
-        )
+        self.handler = PathHandler(self.log_fn, self.ack_handler, self.protocol_response_handler)
 
     def test_payload_type(self):
         """Test path handler payload type."""
@@ -241,9 +239,7 @@ class TestLoginResponseHandler:
         self.log_fn = MagicMock()
         self.send_packet_fn = AsyncMock()
         self.local_identity = LocalIdentity()
-        self.handler = LoginResponseHandler(
-            self.local_identity, self.contacts, self.log_fn
-        )
+        self.handler = LoginResponseHandler(self.local_identity, self.contacts, self.log_fn)
 
     def test_payload_type(self):
         """Test login response handler payload type."""
@@ -264,9 +260,7 @@ class TestProtocolResponseHandler:
         self.log_fn = MagicMock()
         self.send_packet_fn = AsyncMock()
         self.local_identity = LocalIdentity()
-        self.handler = ProtocolResponseHandler(
-            self.log_fn, self.local_identity, self.contacts
-        )
+        self.handler = ProtocolResponseHandler(self.log_fn, self.local_identity, self.contacts)
 
     def test_payload_type(self):
         """Test protocol response handler payload type."""
@@ -338,9 +332,7 @@ async def test_handlers_can_be_called():
 
     handlers = [
         AckHandler(log_fn),
-        TextMessageHandler(
-            local_identity, contacts, log_fn, send_packet_fn, event_service
-        ),
+        TextMessageHandler(local_identity, contacts, log_fn, send_packet_fn, event_service),
         AdvertHandler(contacts, log_fn, local_identity, event_service),
         PathHandler(log_fn),
         GroupTextHandler(local_identity, contacts, log_fn, send_packet_fn),
@@ -360,9 +352,7 @@ async def test_handlers_can_be_called():
         except Exception as e:
             # Some handlers may raise exceptions due to incomplete setup,
             # but they should be callable
-            assert isinstance(
-                e, (ValueError, AttributeError, TypeError)
-            )  # Expected exceptions
+            assert isinstance(e, (ValueError, AttributeError, TypeError))  # Expected exceptions
 
 
 # AnonReqResponseHandler Tests (separate from LoginResponseHandler)

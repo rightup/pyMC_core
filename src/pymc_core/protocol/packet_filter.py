@@ -49,9 +49,7 @@ class PacketFilter:
         """Clean up old packet hashes beyond the deduplication window."""
         current_time = time.time()
         old_hashes = [
-            h
-            for h, ts in self._packet_hashes.items()
-            if current_time - ts > self.window_seconds
+            h for h, ts in self._packet_hashes.items() if current_time - ts > self.window_seconds
         ]
         for h in old_hashes:
             del self._packet_hashes[h]
