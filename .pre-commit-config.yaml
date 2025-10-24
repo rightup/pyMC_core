@@ -30,7 +30,7 @@ repos:
         # Strict but reasonable settings
         args: [
           "--max-line-length=100",
-          "--extend-ignore=E203,W503"
+          "--extend-ignore=E203,E231,W503"
         ]
         # Exclude third-party code but check our core code
         exclude: '^(src/pymc_core/hardware/lora/|examples/)'

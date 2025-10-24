@@ -1,7 +1,7 @@
 import asyncio
 
-from ...protocol import CryptoUtils, Identity, Packet, PacketBuilder
-from ...protocol.constants import PAYLOAD_TYPE_TXT_MSG
+from ...protocol import CryptoUtils, Identity, Packet, PacketBuilder, PacketTimingUtils
+from ...protocol.constants import PAYLOAD_TYPE_ACK, PAYLOAD_TYPE_TXT_MSG
 from .base import BaseHandler
 
 
@@ -17,6 +17,7 @@ class TextMessageHandler(BaseHandler):
         log_fn,
         send_packet_fn,
         event_service=None,
+        radio_config=None,
     ):
         self.local_identity = local_identity
         self.contacts = contacts
@@ -24,26 +25,19 @@ class TextMessageHandler(BaseHandler):
         self.send_packet = send_packet_fn
         self.event_service = event_service  # Event service for broadcasting
         self.command_response_callback = None  # Callback for command responses
+        self.radio_config = radio_config or {}  # Radio configuration for airtime calculations
 
     def set_command_response_callback(self, callback):
         """Set callback function for command responses."""
         self.command_response_callback = callback
 
     async def __call__(self, packet: Packet) -> None:
-        self.log("   TEXT handler called: processing TXT_MSG packet")
-        self.log(f"   Payload length: {len(packet.payload) if packet.payload else 0}")
-        if hasattr(packet, "_rssi"):
-            self.log(
-                f"   RSSI: {packet._rssi}dBm, SNR: {getattr(packet, '_snr', 'N/A')}dB"
-            )
-
         if len(packet.payload) < 4:
             self.log("TXT_MSG payload too short to decrypt")
             return
 
         src_hash = packet.payload[1]
         matched_contact = None
-        self.log(f"FULL hex of payload: {packet.payload.hex()}")
         for contact in self.contacts.contacts:
             try:
                 if bytes.fromhex(contact.public_key)[0] == src_hash:
@@ -56,14 +50,8 @@ class TextMessageHandler(BaseHandler):
             self.log(f"No contact found for src hash: {src_hash:02X}")
             return
 
-        self.log(
-            f"Matched contact: {matched_contact.name} ({matched_contact.public_key[:8]}…)"
-        )
-
         peer_id = Identity(bytes.fromhex(matched_contact.public_key))
-        shared_secret = peer_id.calc_shared_secret(
-            self.local_identity.get_private_key()
-        )
+        shared_secret = peer_id.calc_shared_secret(self.local_identity.get_private_key())
         aes_key = shared_secret[:16]
         payload = packet.payload[2:]  # Skip dest_hash and src_hash
 
@@ -83,23 +71,81 @@ class TextMessageHandler(BaseHandler):
         attempt = flags & 0x03  # Last 2 bits are the attempt number
         message_body = decrypted[5:]  # Rest is the message content
 
-        # Strip null terminator for ACK calculation (like firmware)
-        message_text_for_ack = message_body.rstrip(b"\x00")
-
         pubkey = bytes.fromhex(matched_contact.public_key)
+        timestamp_int = int.from_bytes(timestamp, "little")
 
-        ack_packet = PacketBuilder.create_ack(
-            pubkey=pubkey,
-            timestamp=int.from_bytes(timestamp, "little"),
-            attempt=attempt,
-            text=message_text_for_ack,  # Use stripped version for ACK
+        # Determine message routing type from packet header
+        route_type = packet.header & 0x03  # Route type is in bits 0-1
+        is_flood = route_type == 1  # ROUTE_TYPE_FLOOD = 1
+
+        self.log(
+            f"Processing message - route_type: {route_type}, is_flood: {is_flood}, "
+            f"timestamp: {timestamp_int}"
         )
 
-        # Send ACK with logging
-        self.log("Sending ACK for message")
-        for _ in range(1):
-            await self.send_packet(ack_packet, wait_for_ack=False)
-            await asyncio.sleep(0.5)
+        # Create appropriate ACK response
+        if is_flood:
+            # FLOOD messages use PATH ACK responses with ACK hash in extra payload
+            text_bytes = message_body.rstrip(b"\x00")
+
+            # Calculate ACK hash using standard method (same as DIRECT messages)
+            pack_data = PacketBuilder._pack_timestamp_data(timestamp_int, attempt, text_bytes)
+            ack_hash = CryptoUtils.sha256(pack_data + pubkey)[:4]
+
+            # Create PATH ACK response
+            incoming_path = list(packet.path if hasattr(packet, "path") else [])
+
+            ack_packet = PacketBuilder.create_path_return(
+                dest_hash=PacketBuilder._hash_byte(pubkey),
+                src_hash=PacketBuilder._hash_byte(self.local_identity.get_public_key()),
+                secret=shared_secret,
+                path=incoming_path,
+                extra_type=PAYLOAD_TYPE_ACK,
+                extra=ack_hash,
+            )
+
+            packet_len = len(ack_packet.write_to())
+            ack_airtime = PacketTimingUtils.estimate_airtime_ms(packet_len, self.radio_config)
+            ack_timeout_ms = PacketTimingUtils.calc_flood_timeout_ms(ack_airtime)
+
+            self.log(
+                f"FLOOD ACK timing - packet:{packet_len}B, airtime:{ack_airtime:.1f}ms, "
+                f"delay:{ack_timeout_ms:.1f}ms"
+            )
+            ack_timeout_ms = ack_timeout_ms / 1000.0  # Convert to seconds
+
+        else:
+            # DIRECT messages use discrete ACK packets
+            ack_packet = PacketBuilder.create_ack(
+                pubkey=pubkey,
+                timestamp=timestamp_int,
+                attempt=attempt,
+                text=message_body.rstrip(b"\x00"),
+            )
+
+            packet_len = len(ack_packet.write_to())
+            ack_airtime = PacketTimingUtils.estimate_airtime_ms(packet_len, self.radio_config)
+            ack_timeout_ms = PacketTimingUtils.calc_direct_timeout_ms(ack_airtime, 0)
+
+            self.log(
+                f"DIRECT ACK timing - packet:{packet_len}B, airtime:{ack_airtime:.1f}ms, "
+                f"delay:{ack_timeout_ms:.1f}ms, radio_config:{self.radio_config}"
+            )
+            ack_timeout_ms = ack_timeout_ms / 1000.0  # Convert to seconds
+
+        async def send_delayed_ack():
+            await asyncio.sleep(ack_timeout_ms)
+            try:
+                await self.send_packet(ack_packet, wait_for_ack=False)
+                self.log(
+                    f"ACK packet sent successfully (delayed {ack_timeout_ms*1000:.1f}ms) "
+                    f"for timestamp {timestamp_int}"
+                )
+            except Exception as ack_send_error:
+                self.log(f"Failed to send ACK packet: {ack_send_error}")
+
+        # Schedule ACK to be sent after delay (non-blocking)
+        asyncio.create_task(send_delayed_ack())
 
         decoded_msg = message_body.decode("utf-8", "replace")
         self.log(f"Received TXT_MSG: {decoded_msg}")
@@ -108,9 +154,7 @@ class TextMessageHandler(BaseHandler):
         if self.command_response_callback:
             try:
                 self.command_response_callback(decoded_msg, matched_contact)
-                self.log(
-                    f"Command response captured from {matched_contact.name}: {decoded_msg}"
-                )
+                self.log(f"Command response captured from {matched_contact.name}: {decoded_msg}")
                 # Don't save command responses to regular message database
                 return
             except Exception as e:
@@ -118,13 +162,12 @@ class TextMessageHandler(BaseHandler):
                 # Continue with normal message processing if callback fails
 
         # Save the incoming message by publishing event for app to handle
-        message_timestamp = int.from_bytes(timestamp, "little")
+        message_timestamp = timestamp_int
 
         # Create message event data for the app to handle storage and deduplication
         normalized_timestamp = (message_timestamp // 1000) * 1000
         content_hash = (
-            hash(f"{matched_contact.name}_{decoded_msg}_{normalized_timestamp}")
-            & 0xFFFFFFFF
+            hash(f"{matched_contact.name}_{decoded_msg}_{normalized_timestamp}") & 0xFFFFFFFF
         )
         message_id = f"rx_{normalized_timestamp}_{content_hash:08x}"
 

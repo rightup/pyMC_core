@@ -5,11 +5,7 @@ import pytest
 
 from pymc_core.node.dispatcher import Dispatcher, DispatcherState
 from pymc_core.protocol import Packet
-from pymc_core.protocol.constants import (
-    PAYLOAD_TYPE_ACK,
-    PAYLOAD_TYPE_ADVERT,
-    PAYLOAD_TYPE_TXT_MSG,
-)
+from pymc_core.protocol.constants import PAYLOAD_TYPE_ACK, PAYLOAD_TYPE_ADVERT, PAYLOAD_TYPE_TXT_MSG
 from pymc_core.protocol.packet_filter import PacketFilter
 
 
@@ -20,9 +16,7 @@ def create_test_packet(payload_type: int, payload: bytes) -> bytes:
     # Ensure payload_type is valid (0-15)
     if payload_type > 15:
         payload_type = 15  # Max valid payload type
-    packet.header = (1 << 6) | (
-        payload_type << 2
-    )  # Version 0, route type 1, payload type
+    packet.header = (1 << 6) | (payload_type << 2)  # Version 0, route type 1, payload type
     packet.payload = bytearray(payload)
     packet.payload_len = len(payload)
     packet.path_len = 0  # No path
@@ -121,9 +115,7 @@ def mock_logger():
 @pytest.fixture
 def dispatcher(mock_radio, mock_identity, mock_contact_book, mock_logger):
     packet_filter = PacketFilter()
-    dispatcher = Dispatcher(
-        radio=mock_radio, packet_filter=packet_filter, log_fn=mock_logger
-    )
+    dispatcher = Dispatcher(radio=mock_radio, packet_filter=packet_filter, log_fn=mock_logger)
     # Set additional attributes that are normally set by the node
     dispatcher.local_identity = mock_identity
     dispatcher.contact_book = mock_contact_book
@@ -133,14 +125,10 @@ def dispatcher(mock_radio, mock_identity, mock_contact_book, mock_logger):
 class TestDispatcherInitialization:
     """Test dispatcher initialization and setup."""
 
-    def test_dispatcher_creation(
-        self, mock_radio, mock_identity, mock_contact_book, mock_logger
-    ):
+    def test_dispatcher_creation(self, mock_radio, mock_identity, mock_contact_book, mock_logger):
         """Test creating a dispatcher with valid parameters."""
         packet_filter = PacketFilter()
-        dispatcher = Dispatcher(
-            radio=mock_radio, packet_filter=packet_filter, log_fn=mock_logger
-        )
+        dispatcher = Dispatcher(radio=mock_radio, packet_filter=packet_filter, log_fn=mock_logger)
         # Set additional attributes that are normally set by the node
         dispatcher.local_identity = mock_identity
         dispatcher.contact_book = mock_contact_book
@@ -278,9 +266,7 @@ class TestDispatcherACKSystem:
 
         # Simulate cleanup (this is what run_forever does)
         dispatcher._recent_acks = {
-            crc_key: ts
-            for crc_key, ts in dispatcher._recent_acks.items()
-            if now - ts < 5
+            crc_key: ts for crc_key, ts in dispatcher._recent_acks.items() if now - ts < 5
         }
 
         # Old ACK should be cleaned up
@@ -381,9 +367,7 @@ class TestDispatcherSendPacket:
         packet.payload_len = len(packet.payload)
         packet.path_len = 0
 
-        dispatcher.radio.transmit = AsyncMock(
-            side_effect=Exception("Radio transmit failed")
-        )
+        dispatcher.radio.transmit = AsyncMock(side_effect=Exception("Radio transmit failed"))
 
         result = await dispatcher.send_packet(packet)
 
@@ -530,9 +514,7 @@ class TestDispatcherErrorHandling:
         """Test handling radio transmit errors."""
         # Create a proper Packet object
         packet = Packet()
-        packet.header = (1 << 6) | (
-            PAYLOAD_TYPE_ADVERT << 2
-        )  # ADVERT packets don't wait for ACK
+        packet.header = (1 << 6) | (PAYLOAD_TYPE_ADVERT << 2)  # ADVERT packets don't wait for ACK
         packet.payload = bytearray(b"test_data")
         packet.payload_len = len(packet.payload)
         packet.path_len = 0
@@ -608,9 +590,7 @@ class TestDispatcherIntegration:
         text_packet_data = create_test_packet(PAYLOAD_TYPE_TXT_MSG, b"text message")
 
         # Create and process ACK packet
-        ack_packet_data = create_test_packet(
-            PAYLOAD_TYPE_ACK, b"\x78\x56\x34\x12"
-        )  # CRC
+        ack_packet_data = create_test_packet(PAYLOAD_TYPE_ACK, b"\x78\x56\x34\x12")  # CRC
 
         # Process both packets
         await dispatcher._process_received_packet(text_packet_data)

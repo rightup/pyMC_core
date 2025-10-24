@@ -31,10 +31,7 @@ async def simple_repeat_counter(packet, raw_data=None):
 
     try:
         # Check if this is an advert packet
-        if (
-            hasattr(packet, "get_payload_type")
-            and packet.get_payload_type() == PAYLOAD_TYPE_ADVERT
-        ):
+        if hasattr(packet, "get_payload_type") and packet.get_payload_type() == PAYLOAD_TYPE_ADVERT:
             repeat_count += 1
             print(f"ADVERT REPEAT HEARD #{repeat_count}")
     except Exception as e:

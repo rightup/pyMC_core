@@ -134,9 +134,9 @@ await node.start()
 
 ## Acknowledgements
 
-- Thanks to [MeshCore](https://github.com/meshcore-dev) for the original C++ implementation.  
+- Thanks to [MeshCore](https://github.com/meshcore-dev) for the original C++ implementation.
 - Appreciation to **@scott_33238**, **@liamcottle**, **@recrof**, and **@cheaporeps** on Discord
-  for their ongoing help and patience with my questions. 
+  for their ongoing help and patience with my questions.
 - Waveshare LoRaRF library, modified to use modern `gpiozero` library (`DigitalInputDevice` and `DigitalOutputDevice`) for all GPIO operations, replacing legacy RPi.GPIO methods for compatibility across all recent Raspberry Pi models (Zero, 3, 4, 5)
 - Contributors and third-party libraries (see `pyproject.toml`)
 

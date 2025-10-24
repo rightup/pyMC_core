@@ -67,6 +67,7 @@ from .packet_utils import (
     PacketDataUtils,
     PacketHashingUtils,
     PacketHeaderUtils,
+    PacketTimingUtils,
     PacketValidationUtils,
     RouteTypeUtils,
 )
@@ -90,6 +91,7 @@ __all__ = [
     "PacketHeaderUtils",
     "PacketHashingUtils",
     "RouteTypeUtils",
+    "PacketTimingUtils",
     # Header constants
     "PH_ROUTE_MASK",
     "PH_TYPE_SHIFT",
