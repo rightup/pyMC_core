@@ -78,7 +78,7 @@ class TextMessageHandler(BaseHandler):
         route_type = packet.header & 0x03  # Route type is in bits 0-1
         is_flood = route_type == 1  # ROUTE_TYPE_FLOOD = 1
 
-        self.debug(
+        self.log(
             f"Processing message - route_type: {route_type}, is_flood: {is_flood}, "
             f"timestamp: {timestamp_int}"
         )
