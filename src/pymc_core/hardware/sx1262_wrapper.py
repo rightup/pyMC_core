@@ -933,7 +933,6 @@ class SX1262Radio(LoRaRadio):
         """
         if not self._initialized or self.lora is None:
             return None
-        
         try:
             raw_rssi = self.lora.getRssiInst()
             if raw_rssi is not None:
