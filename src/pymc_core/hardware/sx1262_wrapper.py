@@ -926,6 +926,24 @@ class SX1262Radio(LoRaRadio):
         """Return last received SNR in dB"""
         return self.last_snr
 
+    def get_noise_floor(self) -> Optional[float]:
+        """
+        Get current noise floor (instantaneous RSSI) in dBm.
+        Returns None if radio is not initialized or if reading fails.
+        """
+        if not self._initialized or self.lora is None:
+            return None
+        
+        try:
+            raw_rssi = self.lora.getRssiInst()
+            if raw_rssi is not None:
+                noise_floor_dbm = -(float(raw_rssi) / 2)
+                return noise_floor_dbm
+            return None
+        except Exception as e:
+            logger.debug(f"Failed to read noise floor: {e}")
+            return None
+
     def set_frequency(self, frequency: int) -> bool:
         """Set operating frequency"""
 
