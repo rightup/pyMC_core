@@ -195,7 +195,7 @@ class SX1262Radio(LoRaRadio):
 
         logger.info(
             f"SX1262Radio configured: freq={frequency/1e6:.1f}MHz, "
-            f"power={tx_power}dBm, sf={spreading_factor}, pre={preamble_length}"
+            f"power={tx_power}dBm, sf={spreading_factor}, bw={bandwidth/1000:.1f}kHz, pre={preamble_length}"
         )
         # Register this instance as the active radio for IRQ callback access
         SX1262Radio._active_instance = self
@@ -315,7 +315,7 @@ class SX1262Radio(LoRaRadio):
 
     async def _rx_irq_background_task(self):
         """Background task: waits for RX_DONE IRQ and processes received packets automatically."""
-        logger.info("[RX] Starting RX IRQ background task")
+        logger.debug("[RX] Starting RX IRQ background task")
         rx_check_count = 0
         last_preamble_time = 0
         preamble_timeout = 5.0  # 5 seconds timeout for incomplete preamble detection
@@ -456,14 +456,14 @@ class SX1262Radio(LoRaRadio):
                             raw_rssi = self.lora.getRssiInst()
                             if raw_rssi is not None:
                                 noise_floor_dbm = -(float(raw_rssi) / 2)
-                                logger.info(
+                                logger.debug(
                                     f"[RX Task] Status check #{rx_check_count}, "
                                     f"Noise: {noise_floor_dbm:.1f}dBm"
                                 )
                             else:
-                                logger.info(f"[RX Task] Status check #{rx_check_count}")
+                                logger.debug(f"[RX Task] Status check #{rx_check_count}")
                         except Exception:
-                            logger.info(f"[RX Task] Status check #{rx_check_count}")
+                            logger.debug(f"[RX Task] Status check #{rx_check_count}")
             else:
                 await asyncio.sleep(0.1)  # Longer delay when interrupts not set up
 
@@ -484,7 +484,7 @@ class SX1262Radio(LoRaRadio):
                 self.irq_pin = Button(self.irq_pin_number, pull_up=False)
                 self.irq_pin.when_activated = self._handle_interrupt
                 self._interrupt_setup = True
-                logger.info(f"[RX] IRQ setup successful on pin {self.irq_pin_number}")
+                logger.debug(f"[RX] IRQ setup successful on pin {self.irq_pin_number}")
             except Exception as e:
                 logger.error(f"IRQ setup failed: {e}")
                 raise RuntimeError(f"Failed to set up IRQ pin {self.irq_pin_number}: {e}")
@@ -525,7 +525,11 @@ class SX1262Radio(LoRaRadio):
 
                 self.lora.setBufferBaseAddress(0x00, 0x80)  # TX=0x00, RX=0x80
 
-                self.lora.setLoRaModulation(self.spreading_factor, self.bandwidth, self.coding_rate)
+                # Enable LDRO if symbol duration > 16ms (SF11/62.5kHz = 32.768ms)
+                symbol_duration_ms = (2 ** self.spreading_factor) / (self.bandwidth / 1000)
+                ldro = symbol_duration_ms > 16.0
+                logger.info(f"LDRO {'enabled' if ldro else 'disabled'} (symbol duration: {symbol_duration_ms:.3f}ms)")
+                self.lora.setLoRaModulation(self.spreading_factor, self.bandwidth, self.coding_rate, ldro)
 
                 self.lora.setLoRaPacket(
                     self.lora.HEADER_EXPLICIT,
@@ -564,7 +568,11 @@ class SX1262Radio(LoRaRadio):
                 self.lora.setTxParams(self.tx_power, self.lora.PA_RAMP_200U)
 
                 # Configure modulation and packet parameters
-                self.lora.setLoRaModulation(self.spreading_factor, self.bandwidth, self.coding_rate)
+                # Enable LDRO if symbol duration > 16ms (SF11/62.5kHz = 32.768ms)
+                symbol_duration_ms = (2 ** self.spreading_factor) / (self.bandwidth / 1000)
+                ldro = symbol_duration_ms > 16.0
+                logger.info(f"LDRO {'enabled' if ldro else 'disabled'} (symbol duration: {symbol_duration_ms:.3f}ms)")
+                self.lora.setLoRaModulation(self.spreading_factor, self.bandwidth, self.coding_rate, ldro)
                 self.lora.setPacketParamsLoRa(
                     self.preamble_length,
                     self.lora.HEADER_EXPLICIT,
@@ -600,9 +608,9 @@ class SX1262Radio(LoRaRadio):
                             return True
 
                         self._rx_irq_task = loop.create_task(self._rx_irq_background_task())
-                        logger.info("[RX] RX IRQ background task started")
+                        logger.debug("[RX] RX IRQ background task started")
                     else:
-                        logger.info("[RX] RX IRQ background task already running")
+                        logger.debug("[RX] RX IRQ background task already running")
             except Exception as e:
                 logger.warning(f"Failed to start RX IRQ background handler: {e}")
             return True
@@ -759,13 +767,13 @@ class SX1262Radio(LoRaRadio):
 
     async def _wait_for_transmission_complete(self, timeout_seconds: float) -> bool:
         """Wait for transmission to complete using interrupts. Returns True if successful."""
-        logger.info(f"[TX] Waiting for TX completion (timeout: {timeout_seconds}s)")
+        logger.debug(f"[TX] Waiting for TX completion (timeout: {timeout_seconds}s)")
         start_time = time.time()
 
         # IRQ setup is required
         try:
             await asyncio.wait_for(self._tx_done_event.wait(), timeout=timeout_seconds)
-            logger.info("[TX] TX completion interrupt received!")
+            logger.debug("[TX] TX completion interrupt received!")
             return True
         except asyncio.TimeoutError:
             logger.error("[TX] TX completion timeout - no interrupt received!")
@@ -917,6 +925,23 @@ class SX1262Radio(LoRaRadio):
     def get_last_snr(self) -> float:
         """Return last received SNR in dB"""
         return self.last_snr
+
+    def get_noise_floor(self) -> Optional[float]:
+        """
+        Get current noise floor (instantaneous RSSI) in dBm.
+        Returns None if radio is not initialized or if reading fails.
+        """
+        if not self._initialized or self.lora is None:
+            return None
+        try:
+            raw_rssi = self.lora.getRssiInst()
+            if raw_rssi is not None:
+                noise_floor_dbm = -(float(raw_rssi) / 2)
+                return noise_floor_dbm
+            return None
+        except Exception as e:
+            logger.debug(f"Failed to read noise floor: {e}")
+            return None
 
     def set_frequency(self, frequency: int) -> bool:
         """Set operating frequency"""
