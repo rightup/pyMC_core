@@ -67,26 +67,26 @@ async def send_channel_message(radio_type: str = "waveshare", serial_port: str =
 def main():
     """Main function for running the example."""
     import argparse
-    
+
     parser = argparse.ArgumentParser(description="Send a channel message to the Public channel")
     parser.add_argument(
-        "--radio-type", 
+        "--radio-type",
         choices=["waveshare", "uconsole", "meshadv-mini", "kiss-tnc"],
         default="waveshare",
-        help="Radio hardware type (default: waveshare)"
+        help="Radio hardware type (default: waveshare)",
     )
     parser.add_argument(
         "--serial-port",
-        default="/dev/ttyUSB0", 
-        help="Serial port for KISS TNC (default: /dev/ttyUSB0)"
+        default="/dev/ttyUSB0",
+        help="Serial port for KISS TNC (default: /dev/ttyUSB0)",
     )
-    
+
     args = parser.parse_args()
-    
+
     print(f"Using {args.radio_type} radio configuration")
     if args.radio_type == "kiss-tnc":
         print(f"Serial port: {args.serial_port}")
-    
+
     try:
         packet, node = asyncio.run(send_channel_message(args.radio_type, args.serial_port))
         print("Example completed")

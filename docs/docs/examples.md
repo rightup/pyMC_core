@@ -10,7 +10,7 @@ This directory contains examples for using PyMC Core functionality. More example
 
 All examples support multiple radio types via `--radio-type` argument:
 
-- `send_tracked_advert.py`: Send location-tracked advertisements  
+- `send_tracked_advert.py`: Send location-tracked advertisements
 - `send_direct_advert.py`: Send direct advertisements without mesh routing
 - `send_flood_advert.py`: Send flood advertisements that propagate through mesh
 - `send_text_message.py`: Send text messages to mesh nodes
@@ -22,7 +22,7 @@ All examples support multiple radio types via `--radio-type` argument:
 
 ### SX1262 Direct Radio
 - **waveshare**: Waveshare SX1262 HAT for Raspberry Pi
-- **uconsole**: ClockworkPi uConsole LoRa module  
+- **uconsole**: ClockworkPi uConsole LoRa module
 - **meshadv-mini**: MeshAdviser Mini board
 
 ### KISS TNC
@@ -113,7 +113,7 @@ python examples/send_tracked_advert.py --radio-type kiss-tnc --serial-port /dev/
 # Send text message via KISS TNC
 python examples/send_text_message.py --radio-type kiss-tnc --serial-port /dev/ttyUSB0
 
-# Send flood advert via KISS TNC  
+# Send flood advert via KISS TNC
 python examples/send_flood_advert.py --radio-type kiss-tnc --serial-port /dev/cu.usbserial-0001
 
 # Send channel message via KISS TNC

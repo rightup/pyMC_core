@@ -25,20 +25,22 @@ from pymc_core.protocol.packet_builder import PacketBuilder
 repeat_count = 0
 
 
-async def simple_repeat_counter(packet, raw_data=None):
-    """Simple handler that just counts advert repeats."""
+def simple_repeat_counter(raw_data: bytes):
+    """Simple handler that just counts packet repeats."""
     global repeat_count
 
     try:
-        # Check if this is an advert packet
-        if hasattr(packet, "get_payload_type") and packet.get_payload_type() == PAYLOAD_TYPE_ADVERT:
-            repeat_count += 1
-            print(f"ADVERT REPEAT HEARD #{repeat_count}")
+        # Simple check - just count any received packet as a potential repeat
+        # I have kept it simple but you would want to check if its actaully a advert etc.
+        repeat_count += 1
+        print(f"PACKET REPEAT HEARD #{repeat_count} ({len(raw_data)} bytes)")
     except Exception as e:
         print(f"Error processing packet: {e}")
 
 
-async def send_simple_tracked_advert(radio_type: str = "waveshare", serial_port: str = "/dev/ttyUSB0"):
+async def send_simple_tracked_advert(
+    radio_type: str = "waveshare", serial_port: str = "/dev/ttyUSB0"
+):
     """Send a tracked advert and count responses."""
     global repeat_count
 
@@ -57,8 +59,9 @@ async def send_simple_tracked_advert(radio_type: str = "waveshare", serial_port:
     )
 
     print_packet_info(advert_packet, "Created advert packet")
-    print("Sending advert...")
+
     # Send the packet
+    print("\nSending advert...")
     success = await mesh_node.dispatcher.send_packet(advert_packet, wait_for_ack=False)
 
     if success:
@@ -66,8 +69,8 @@ async def send_simple_tracked_advert(radio_type: str = "waveshare", serial_port:
         print("Listening for repeats... (Ctrl+C to stop)")
         print("-" * 40)
 
-        # Set up simple repeat counter
-        mesh_node.dispatcher.set_packet_received_callback(simple_repeat_counter)
+        # Set up simple repeat counter directly on the radio
+        mesh_node.radio.set_rx_callback(simple_repeat_counter)
 
         # Listen continuously
         try:
@@ -86,26 +89,26 @@ async def send_simple_tracked_advert(radio_type: str = "waveshare", serial_port:
 def main():
     """Main function for running the example."""
     import argparse
-    
+
     parser = argparse.ArgumentParser(description="Send a location-tracked advertisement")
     parser.add_argument(
-        "--radio-type", 
+        "--radio-type",
         choices=["waveshare", "uconsole", "meshadv-mini", "kiss-tnc"],
         default="waveshare",
-        help="Radio hardware type (default: waveshare)"
+        help="Radio hardware type (default: waveshare)",
     )
     parser.add_argument(
         "--serial-port",
-        default="/dev/ttyUSB0", 
-        help="Serial port for KISS TNC (default: /dev/ttyUSB0)"
+        default="/dev/ttyUSB0",
+        help="Serial port for KISS TNC (default: /dev/ttyUSB0)",
     )
-    
+
     args = parser.parse_args()
-    
+
     print(f"Using {args.radio_type} radio configuration")
     if args.radio_type == "kiss-tnc":
         print(f"Serial port: {args.serial_port}")
-    
+
     try:
         packet, node = asyncio.run(send_simple_tracked_advert(args.radio_type, args.serial_port))
         print("Example completed")

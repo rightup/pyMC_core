@@ -6,7 +6,7 @@ This directory contains examples demonstrating how to use PyMC Core with differe
 
 All examples support multiple radio types via `--radio-type` argument:
 
-- **`send_tracked_advert.py`**: Send location-tracked advertisements  
+- **`send_tracked_advert.py`**: Send location-tracked advertisements
 - **`send_direct_advert.py`**: Send direct advertisements without mesh routing
 - **`send_text_message.py`**: Send text messages to mesh nodes
 - **`send_channel_message.py`**: Send messages to specific channels
@@ -16,7 +16,7 @@ All examples support multiple radio types via `--radio-type` argument:
 
 ### Direct Radio (SX1262)
 - **waveshare**: Waveshare SX1262 HAT for Raspberry Pi
-- **uconsole**: ClockworkPi uConsole LoRa module  
+- **uconsole**: ClockworkPi uConsole LoRa module
 - **meshadv-mini**: MeshAdviser Mini board
 
 ### KISS TNC
@@ -95,7 +95,7 @@ meshadv_config = {
 ```python
 kiss_config = {
     'frequency': int(869.525 * 1000000),  # 869.525 MHz in Hz
-    'bandwidth': int(250 * 1000),         # 250 kHz in Hz  
+    'bandwidth': int(250 * 1000),         # 250 kHz in Hz
     'spreading_factor': 11,               # LoRa SF11
     'coding_rate': 5,                     # LoRa CR 4/5
     'sync_word': 0x12,                    # Sync word
@@ -128,7 +128,7 @@ python3 send_text_message.py --radio-type kiss-tnc --serial-port /dev/ttyUSB0
 # Send direct advert via KISS TNC
 python3 send_direct_advert.py --radio-type kiss-tnc --serial-port /dev/cu.usbserial-0001
 
-# Send flood advert via KISS TNC  
+# Send flood advert via KISS TNC
 python3 send_flood_advert.py --radio-type kiss-tnc --serial-port /dev/ttyUSB0
 
 # Send channel message via KISS TNC
@@ -143,11 +143,11 @@ python3 ping_repeater_trace.py --radio-type kiss-tnc --serial-port /dev/cu.usbse
 Provides shared utilities for examples:
 
 - `create_radio(radio_type, serial_port)`: Create radio instances
-- `create_mesh_node(name, radio_type, serial_port)`: Create mesh nodes  
+- `create_mesh_node(name, radio_type, serial_port)`: Create mesh nodes
 - `print_packet_info(packet, description)`: Debug packet information
 
 **Supported Radio Types:**
-- `waveshare`: Waveshare SX1262 HAT  
+- `waveshare`: Waveshare SX1262 HAT
 - `uconsole`: ClockworkPi uConsole LoRa
 - `meshadv-mini`: MeshAdviser Mini board
 - `kiss-tnc`: KISS TNC devices

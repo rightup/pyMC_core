@@ -195,7 +195,8 @@ class SX1262Radio(LoRaRadio):
 
         logger.info(
             f"SX1262Radio configured: freq={frequency/1e6:.1f}MHz, "
-            f"power={tx_power}dBm, sf={spreading_factor}, bw={bandwidth/1000:.1f}kHz, pre={preamble_length}"
+            f"power={tx_power}dBm, sf={spreading_factor}, "
+            f"bw={bandwidth/1000:.1f}kHz, pre={preamble_length}"
         )
         # Register this instance as the active radio for IRQ callback access
         SX1262Radio._active_instance = self
@@ -526,10 +527,15 @@ class SX1262Radio(LoRaRadio):
                 self.lora.setBufferBaseAddress(0x00, 0x80)  # TX=0x00, RX=0x80
 
                 # Enable LDRO if symbol duration > 16ms (SF11/62.5kHz = 32.768ms)
-                symbol_duration_ms = (2 ** self.spreading_factor) / (self.bandwidth / 1000)
+                symbol_duration_ms = (2**self.spreading_factor) / (self.bandwidth / 1000)
                 ldro = symbol_duration_ms > 16.0
-                logger.info(f"LDRO {'enabled' if ldro else 'disabled'} (symbol duration: {symbol_duration_ms:.3f}ms)")
-                self.lora.setLoRaModulation(self.spreading_factor, self.bandwidth, self.coding_rate, ldro)
+                logger.info(
+                    f"LDRO {'enabled' if ldro else 'disabled'} "
+                    f"(symbol duration: {symbol_duration_ms:.3f}ms)"
+                )
+                self.lora.setLoRaModulation(
+                    self.spreading_factor, self.bandwidth, self.coding_rate, ldro
+                )
 
                 self.lora.setLoRaPacket(
                     self.lora.HEADER_EXPLICIT,
@@ -569,10 +575,15 @@ class SX1262Radio(LoRaRadio):
 
                 # Configure modulation and packet parameters
                 # Enable LDRO if symbol duration > 16ms (SF11/62.5kHz = 32.768ms)
-                symbol_duration_ms = (2 ** self.spreading_factor) / (self.bandwidth / 1000)
+                symbol_duration_ms = (2**self.spreading_factor) / (self.bandwidth / 1000)
                 ldro = symbol_duration_ms > 16.0
-                logger.info(f"LDRO {'enabled' if ldro else 'disabled'} (symbol duration: {symbol_duration_ms:.3f}ms)")
-                self.lora.setLoRaModulation(self.spreading_factor, self.bandwidth, self.coding_rate, ldro)
+                logger.info(
+                    f"LDRO {'enabled' if ldro else 'disabled'} "
+                    f"(symbol duration: {symbol_duration_ms:.3f}ms)"
+                )
+                self.lora.setLoRaModulation(
+                    self.spreading_factor, self.bandwidth, self.coding_rate, ldro
+                )
                 self.lora.setPacketParamsLoRa(
                     self.preamble_length,
                     self.lora.HEADER_EXPLICIT,

@@ -12,7 +12,7 @@ import sys
 
 # Set up logging
 logging.basicConfig(
-    level=logging.DEBUG, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
 
@@ -41,32 +41,33 @@ def create_radio(radio_type: str = "waveshare", serial_port: str = "/dev/ttyUSB0
         # Check if this is a KISS TNC configuration
         if radio_type == "kiss-tnc":
             from pymc_core.hardware.kiss_serial_wrapper import KissSerialWrapper
+
             logger.debug("Using KISS Serial Wrapper")
-            
+
             # KISS TNC configuration
             kiss_config = {
-                'frequency': int(869.525 * 1000000),  # EU: 869.525 MHz
-                'bandwidth': int(250 * 1000),          # 250 kHz
-                'spreading_factor': 11,                # LoRa SF11
-                'coding_rate': 5,                      # LoRa CR 4/5
-                'sync_word': 0x12,                     # Sync word
-                'power': 22                            # TX power
+                "frequency": int(869.618 * 1000000),  # EU: 869.525 MHz
+                "bandwidth": int(62.5 * 1000),  # 250 kHz
+                "spreading_factor": 8,  # LoRa SF11
+                "coding_rate": 8,  # LoRa CR 4/5
+                "sync_word": 0x12,  # Sync word
+                "power": 22,  # TX power
             }
-            
+
             # Create KISS wrapper with specified port
             kiss_wrapper = KissSerialWrapper(
-                port=serial_port,
-                baudrate=115200,
-                radio_config=kiss_config,
-                auto_configure=True
+                port=serial_port, baudrate=115200, radio_config=kiss_config, auto_configure=True
             )
-            
+
             logger.info("Created KISS Serial Wrapper")
-            logger.info(f"Frequency: {kiss_config['frequency']/1000000:.3f}MHz, TX Power: {kiss_config['power']}dBm")
+            logger.info(
+                f"Frequency: {kiss_config['frequency']/1000000:.3f}MHz, TX Power: {kiss_config['power']}dBm"
+            )
             return kiss_wrapper
-        
+
         # Direct SX1262 radio for other types
         from pymc_core.hardware.sx1262_wrapper import SX1262Radio
+
         logger.debug("Imported SX1262Radio successfully")
 
         # Radio configurations for different hardware
@@ -175,14 +176,14 @@ def create_mesh_node(
             logger.debug("Connecting KISS radio...")
             if radio.connect():
                 logger.info("KISS radio connected successfully")
-                print(f"✓ KISS radio connected to {serial_port}")
-                if hasattr(radio, 'kiss_mode_active') and radio.kiss_mode_active:
-                    print("✓ KISS mode is active")
+                print(f"KISS radio connected to {serial_port}")
+                if hasattr(radio, "kiss_mode_active") and radio.kiss_mode_active:
+                    print("KISS mode is active")
                 else:
-                    print("⚠ KISS mode may not be active")
+                    print("Warning: KISS mode may not be active")
             else:
                 logger.error("Failed to connect KISS radio")
-                print(f"✗ Failed to connect to KISS radio on {serial_port}")
+                print(f"Failed to connect to KISS radio on {serial_port}")
                 raise Exception(f"KISS radio connection failed on {serial_port}")
         else:
             logger.debug("Calling radio.begin()...")
