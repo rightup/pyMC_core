@@ -24,12 +24,12 @@ from pymc_core.protocol.packet_builder import PacketBuilder
 from pymc_core.protocol.packet_utils import PacketDataUtils
 
 
-async def ping_repeater(radio_type: str = "waveshare"):
+async def ping_repeater(radio_type: str = "waveshare", serial_port: str = "/dev/ttyUSB0"):
     """
     Ping a specific repeater using trace packets with callback response handling.
     This demonstrates the proper way to handle asynchronous trace responses.
     """
-    mesh_node, identity = create_mesh_node("PingNode", radio_type)
+    mesh_node, identity = create_mesh_node("PingNode", radio_type, serial_port)
 
     # Create an event to signal when response is received
     response_received = asyncio.Event()
@@ -79,14 +79,31 @@ async def ping_repeater(radio_type: str = "waveshare"):
         print("Trace handler not available")
 
 
-def main(radio_type: str = "waveshare"):
+def main():
     """Main function for running the example."""
-    print(f"Using {radio_type} radio configuration")
-    asyncio.run(ping_repeater(radio_type))
+    import argparse
+    
+    parser = argparse.ArgumentParser(description="Ping a repeater using trace packets")
+    parser.add_argument(
+        "--radio-type", 
+        choices=["waveshare", "uconsole", "meshadv-mini", "kiss-tnc"],
+        default="waveshare",
+        help="Radio hardware type (default: waveshare)"
+    )
+    parser.add_argument(
+        "--serial-port",
+        default="/dev/ttyUSB0", 
+        help="Serial port for KISS TNC (default: /dev/ttyUSB0)"
+    )
+    
+    args = parser.parse_args()
+    
+    print(f"Using {args.radio_type} radio configuration")
+    if args.radio_type == "kiss-tnc":
+        print(f"Serial port: {args.serial_port}")
+    
+    asyncio.run(ping_repeater(args.radio_type, args.serial_port))
 
 
 if __name__ == "__main__":
-    import sys
-
-    radio_type = sys.argv[1] if len(sys.argv) > 1 else "waveshare"
-    main(radio_type)
+    main()

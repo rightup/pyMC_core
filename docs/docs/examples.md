@@ -6,27 +6,40 @@ This section contains practical examples of using pyMC_Core for mesh communicati
 
 This directory contains examples for using PyMC Core functionality. More examples will be added over time.
 
-## Files
+## Available Examples
 
-- `common.py`: Shared utilities and mock implementations used by all examples
-- `send_flood_advert.py`: Flood advertisement example
-- `send_direct_advert.py`: Direct advertisement example
-- `send_tracked_advert.py`: Tracked advertisement example
-- `ping_repeater_trace.py`: Trace ping example for repeater diagnostics
+All examples support multiple radio types via `--radio-type` argument:
+
+- `send_tracked_advert.py`: Send location-tracked advertisements  
+- `send_direct_advert.py`: Send direct advertisements without mesh routing
+- `send_flood_advert.py`: Send flood advertisements that propagate through mesh
+- `send_text_message.py`: Send text messages to mesh nodes
+- `send_channel_message.py`: Send messages to specific channels
+- `ping_repeater_trace.py`: Test mesh routing and trace packet paths
+- `common.py`: Shared utilities for radio setup and mesh node creation
+
+## Radio Hardware Support
+
+### SX1262 Direct Radio
+- **waveshare**: Waveshare SX1262 HAT for Raspberry Pi
+- **uconsole**: ClockworkPi uConsole LoRa module  
+- **meshadv-mini**: MeshAdviser Mini board
+
+### KISS TNC
+- **kiss-tnc**: Serial KISS TNC devices (MeshTNC)
 
 ## Shared Components (`common.py`)
 
-### `MockLoRaRadio`
-Mock radio implementation for testing and demonstration:
-- Simulates LoRa hardware without requiring actual hardware
-- Logs transmission operations
-- Returns realistic RSSI/SNR values
-- Implements the `LoRaRadio` interface
+### `create_radio(radio_type, serial_port)`
+Creates radio instances for different hardware types:
+- **SX1262 Radios**: Direct hardware control via SPI/GPIO
+- **KISS TNC**: Serial protocol wrapper for TNC devices
+- Supports waveshare, uconsole, meshadv-mini, and kiss-tnc types
 
-### `create_mesh_node(node_name)`
+### `create_mesh_node(name, radio_type, serial_port)`
 Helper function that creates a mesh node setup:
 - Generates a new `LocalIdentity` with cryptographic keypair
-- Creates and initializes a `MockLoRaRadio`
+- Creates and configures the specified radio type
 - Returns configured `MeshNode` and `LocalIdentity`
 
 ### `print_packet_info(packet, description)`
@@ -60,62 +73,63 @@ Example showing how to ping a repeater using trace packets for network diagnosti
 
 ## Running the Examples
 
-All examples use SX1262 LoRa radio hardware with support for multiple radio types.
+All examples support multiple radio hardware types via unified command-line arguments.
 
-### Direct Execution (Recommended)
+### Command Line Interface
 
-Run the example scripts directly with optional radio type selection:
+Each example uses argparse with consistent options:
 
 ```bash
-# Run examples with default Waveshare radio
-python examples/send_flood_advert.py
-python examples/send_direct_advert.py
-python examples/send_text_message.py
-python examples/send_channel_message.py
-python examples/ping_repeater_trace.py
+# Show help for any example
+python examples/send_tracked_advert.py --help
+```
+
+**Arguments:**
+- `--radio-type`: Choose hardware type (waveshare, uconsole, meshadv-mini, kiss-tnc)
+- `--serial-port`: Serial port for KISS TNC (default: /dev/ttyUSB0)
+
+### SX1262 Direct Radio Examples
+
+```bash
+# Send tracked advert with Waveshare HAT (default)
 python examples/send_tracked_advert.py
 
-# Run examples with uConsole radio
-python examples/send_flood_advert.py uconsole
-python examples/send_direct_advert.py uconsole
-python examples/send_text_message.py uconsole
+# Send text message with uConsole
+python examples/send_text_message.py --radio-type uconsole
+
+# Send direct advert with MeshAdv Mini
+python examples/send_direct_advert.py --radio-type meshadv-mini
+
+# Ping test with Waveshare
+python examples/ping_repeater_trace.py --radio-type waveshare
 ```
 
-Each example script accepts an optional radio type parameter:
-- `waveshare` (default) - Waveshare SX1262 HAT
-- `uconsole` - HackerGadgets uConsole
-- `meshadv-mini` - FrequencyLabs meshadv-mini
-
-You can also run examples directly with command-line arguments:
+### KISS TNC Examples
 
 ```bash
-# Default Waveshare HAT configuration
-python examples/send_flood_advert.py
+# Send tracked advert via KISS TNC
+python examples/send_tracked_advert.py --radio-type kiss-tnc --serial-port /dev/cu.usbserial-0001
 
-# uConsole configuration
-python examples/send_flood_advert.py uconsole
-```
+# Send text message via KISS TNC
+python examples/send_text_message.py --radio-type kiss-tnc --serial-port /dev/ttyUSB0
 
-### Command Line Options
+# Send flood advert via KISS TNC  
+python examples/send_flood_advert.py --radio-type kiss-tnc --serial-port /dev/cu.usbserial-0001
 
-Each example accepts an optional radio type parameter:
+# Send channel message via KISS TNC
+python examples/send_channel_message.py --radio-type kiss-tnc --serial-port /dev/ttyUSB0
 
-- `waveshare` (default): Waveshare LoRaWAN/GNSS HAT configuration
-- `uconsole`: HackerGadgets uConsole configuration
-- `meshadv-mini`: Frequency Labs Mesh Adv
-
-```bash
-# Examples with explicit radio type
-python examples/send_flood_advert.py waveshare
-python examples/send_flood_advert.py uconsole
-python examples/send_flood_advert.py meshadv-mini
+# Ping test via KISS TNC
+python examples/ping_repeater_trace.py --radio-type kiss-tnc --serial-port /dev/cu.usbserial-0001
 ```
 
 ## Hardware Requirements
 
-### Supported SX1262 Radio Hardware
+### Supported Radio Hardware
 
-pyMC_Core supports multiple SX1262-based LoRa radio modules:
+pyMC_Core supports both direct SX1262 radio control and KISS TNC devices:
+
+### SX1262 Direct Radio Hardware
 
 #### Waveshare LoRaWAN/GNSS HAT
 - **Hardware**: Waveshare SX1262 LoRa HAT
@@ -174,6 +188,23 @@ pyMC_Core supports multiple SX1262-based LoRa radio modules:
 - TX Enable: Not used (-1)
 - RX Enable: GPIO 12
 
+### KISS TNC Hardware
+
+#### KISS TNC Devices
+- **Hardware**: Any KISS-compatible TNC device (MeshTNC, etc.)
+- **Interface**: Serial/USB connection
+- **Protocol**: KISS Serial Protocol
+- **Configuration**: Radio settings handled by TNC firmware
+- **Connection**: USB, RS-232, or TTL serial
+- **Baud Rate**: 115200 (default, configurable)
+- **Advantages**: No GPIO/SPI setup required, plug-and-play operation
+
+**Supported TNC Devices:**
+- MeshTNC boards
+- OpenTracker+ with KISS firmware
+- Mobilinkd TNC devices
+- Custom Arduino/ESP32 KISS TNCs
+
 ## Dependencies
 
 > **Important**: On modern Python installations (Ubuntu 22.04+, Debian 12+), you may encounter `externally-managed-environment` errors when installing packages system-wide. Create a virtual environment first:
@@ -194,11 +225,18 @@ pyMC_Core supports multiple SX1262-based LoRa radio modules:
 pip install pymc_core
 ```
 
-### Hardware Dependencies (for SX1262 radio)
+### Hardware Dependencies
+
+**For SX1262 Direct Radio:**
 ```bash
 pip install pymc_core[hardware]
 # or manually:
 pip install gpiozero lgpio
+```
+
+**For KISS TNC:**
+```bash
+pip install pyserial
 ```
 
 ### All Dependencies
@@ -208,9 +246,19 @@ pip install pymc_core[all]
 
 ## Hardware Setup
 
+### SX1262 Direct Radio Setup
+
 1. Connect SX1262 module to Raspberry Pi GPIO pins according to the pin configuration
-2. Install required Python packages
-3. Run any example to test the setup
+2. Enable SPI interface: `sudo raspi-config` → Interface Options → SPI
+3. Install required Python packages
+4. Run any example to test the setup
+
+### KISS TNC Setup
+
+1. Connect KISS TNC device via USB or serial
+2. Install pyserial: `pip install pyserial`
+3. Identify serial port: `ls /dev/tty*` or `ls /dev/cu.*` (macOS)
+4. Run examples with `--radio-type kiss-tnc --serial-port /dev/ttyUSB0`
 
 The examples will automatically initialize the radio with the default configuration and send packets.
 
@@ -288,7 +336,23 @@ All examples use the SX1262 LoRa radio with the following default settings:
 - **TX Enable**: Not used (-1)
 - **RX Enable**: GPIO 12
 
-The radio configuration is hardcoded in `common.py` for simplicity and reliability.
+### KISS TNC Configuration
+- **Radio Type**: KISS Serial Protocol over TNC device
+- **Frequency**: 869.525MHz (EU standard, configurable)
+- **TX Power**: 22dBm (configurable)
+- **Spreading Factor**: 11 (configurable)
+- **Bandwidth**: 250kHz (configurable)
+- **Coding Rate**: 4/5 (configurable)
+- **Serial Port**: /dev/ttyUSB0 (Linux), /dev/cu.usbserial-* (macOS)
+- **Baud Rate**: 115200 (default)
+- **Protocol**: KISS frames with radio configuration commands
+- **Auto Configure**: Automatically configures TNC and enters KISS mode
+
+All radio configurations use Hz-based frequency and bandwidth values for consistency:
+- **Frequency**: `int(869.525 * 1000000)` (869.525 MHz in Hz)
+- **Bandwidth**: `int(250 * 1000)` (250 kHz in Hz)
+
+The radio configurations are defined in `common.py` for each hardware type.
 
 ## Hardware Setup
 
@@ -430,4 +494,75 @@ custom_packet = Packet(
 )
 
 await node.send_packet(custom_packet)
+```
+
+## Troubleshooting
+
+### SX1262 Radio Issues
+
+**SPI Communication Problems:**
+```bash
+# Enable SPI interface
+sudo raspi-config # → Interface Options → SPI
+
+# Check SPI devices
+ls /dev/spi*
+
+# Verify GPIO permissions
+sudo usermod -a -G gpio $USER
+```
+
+**GPIO Access Errors:**
+```bash
+# Install modern GPIO library
+sudo apt install python3-rpi.lgpio
+
+# Remove old GPIO library if present
+sudo apt remove python3-rpi.gpio
+```
+
+### KISS TNC Issues
+
+**Serial Port Problems:**
+```bash
+# Find available serial ports
+ls /dev/tty*        # Linux
+ls /dev/cu.*        # macOS
+
+# Check port permissions
+sudo chmod 666 /dev/ttyUSB0
+
+# Test serial connection
+screen /dev/ttyUSB0 115200
+```
+
+**KISS Protocol Issues:**
+- Verify TNC supports KISS mode
+- Check baud rate (default: 115200)
+- Ensure no other programs using port
+- Try different serial port if multiple devices
+
+**Configuration Problems:**
+- All examples use Hz-based frequency values
+- KISS TNC automatically configures radio
+- Check TNC firmware supports configuration commands
+
+### Import Errors
+
+**Module Not Found:**
+```bash
+# Install in development mode
+cd pyMC_core
+pip install -e .
+
+# Or install from PyPI
+pip install pymc_core
+```
+
+**Virtual Environment Issues:**
+```bash
+# Create fresh virtual environment
+python3 -m venv pymc_env
+source pymc_env/bin/activate  # Linux/Mac
+pip install pymc_core
 ```

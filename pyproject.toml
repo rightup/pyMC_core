@@ -38,6 +38,7 @@ hardware = [
     "gpiozero>=2.0.0",
     "lgpio>=0.2.0",
     "spidev>=3.5",
+    "pyserial>=3.5",
 ]
 websocket = [
     "websockets>=11.0.0",
