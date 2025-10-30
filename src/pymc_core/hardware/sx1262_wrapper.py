@@ -953,15 +953,51 @@ class SX1262Radio(LoRaRadio):
         """
         if not self._initialized or self.lora is None:
             return None
+        
+        # Skip noise floor reading if we're currently transmitting
+        if hasattr(self, '_tx_lock') and self._tx_lock.locked():
+            return None
+            
         try:
             raw_rssi = self.lora.getRssiInst()
             if raw_rssi is not None:
                 noise_floor_dbm = -(float(raw_rssi) / 2)
-                return noise_floor_dbm
+                # Validate reading - reject obviously invalid values
+                if -150.0 <= noise_floor_dbm <= -50.0:
+                    return noise_floor_dbm
+                else:
+                    # Invalid reading detected - trigger radio state reset
+                    logger.debug(f"Invalid noise floor reading: {noise_floor_dbm:.1f}dBm - resetting radio")
+                    self._reset_radio_state()
+                    return None
             return None
         except Exception as e:
             logger.debug(f"Failed to read noise floor: {e}")
             return None
+
+    def _reset_radio_state(self) -> None:
+        """Reset radio state to recover from invalid RSSI readings"""
+        if not self._initialized or self.lora is None:
+            return
+            
+        try:
+            # Force radio back to standby then RX mode
+            self.lora.setStandby(self.lora.STANDBY_RC)
+            time.sleep(0.05)  # Let radio settle
+            
+            # Clear interrupt flags
+            irq_status = self.lora.getIrqStatus()
+            if irq_status != 0:
+                self.lora.clearIrqStatus(irq_status)
+            
+            # Restore RX mode
+            rx_mask = self._get_rx_irq_mask()
+            self.lora.setDioIrqParams(rx_mask, rx_mask, self.lora.IRQ_NONE, self.lora.IRQ_NONE)
+            self.lora.setRx(self.lora.RX_CONTINUOUS)
+            
+            logger.debug("Radio state reset completed")
+        except Exception as e:
+            logger.warning(f"Failed to reset radio state: {e}")
 
     def set_frequency(self, frequency: int) -> bool:
         """Set operating frequency"""
