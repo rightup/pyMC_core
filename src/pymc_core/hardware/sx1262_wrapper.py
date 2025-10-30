@@ -610,6 +610,13 @@ class SX1262Radio(LoRaRadio):
             self._initialized = True
             logger.info("SX1262 radio initialized successfully")
 
+            # Perform AGC reset at startup to ensure clean noise floor readings
+            logger.info("Performing startup AGC reset")
+            if self.reset_agc():
+                logger.info("Startup AGC reset successful")
+            else:
+                logger.warning("Startup AGC reset failed - continuing anyway")
+
             # Start RX IRQ background handler if using interrupts (only once)
             try:
                 if self._interrupt_setup:
@@ -961,15 +968,8 @@ class SX1262Radio(LoRaRadio):
             raw_rssi = self.lora.getRssiInst()
             if raw_rssi is not None:
                 noise_floor_dbm = -(float(raw_rssi) / 2)
-                
-                # Validate reading - reject obviously invalid values OR stuck AGC
+                # Validate reading - reject obviously invalid values
                 if -150.0 <= noise_floor_dbm <= -50.0:
-                    # Check for stuck AGC pattern (noise floor stuck at -75 to -80dBm range)
-                    if -80.0 <= noise_floor_dbm <= -75.0:
-                        # This looks like stuck AGC - trigger reset
-                        logger.warning(f"Suspected stuck AGC reading: {noise_floor_dbm:.1f}dBm - resetting radio")
-                        self._reset_radio_state()
-                        return None
                     return noise_floor_dbm
                 else:
                     # Invalid reading detected - trigger radio state reset
@@ -996,12 +996,6 @@ class SX1262Radio(LoRaRadio):
             if irq_status != 0:
                 self.lora.clearIrqStatus(irq_status)
             
-            # Set RF switch to RX mode
-            self._control_tx_rx_pins(tx_mode=False)
-            
-            # Perform full calibration to reset AGC (SX1262 equivalent of RadioLib's automatic reset)
-            self.lora.calibrate(0x7F)
-            
             # Restore RX mode
             rx_mask = self._get_rx_irq_mask()
             self.lora.setDioIrqParams(rx_mask, rx_mask, self.lora.IRQ_NONE, self.lora.IRQ_NONE)
@@ -1010,6 +1004,54 @@ class SX1262Radio(LoRaRadio):
             logger.debug("Radio state reset completed")
         except Exception as e:
             logger.warning(f"Failed to reset radio state: {e}")
+
+    def reset_agc(self) -> bool:
+        """
+        Manually reset the AGC (Automatic Gain Control) to recover from stuck noise floor readings.
+        Call this method when noise floor readings appear stuck (e.g., -77dBm instead of -110dBm).
+        Returns True if reset was successful.
+        """
+        if not self._initialized or self.lora is None:
+            logger.warning("Cannot reset AGC - radio not initialized")
+            return False
+            
+        try:
+            logger.info("Performing manual AGC reset")
+            
+            # More aggressive reset for stuck AGC
+            self.lora.setStandby(self.lora.STANDBY_RC)
+            time.sleep(0.1)  # Longer settle time
+            
+            # Clear all interrupt flags
+            self.lora.clearIrqStatus(0xFFFF)
+            
+            # Set RF switch to RX mode
+            self._control_tx_rx_pins(tx_mode=False)
+            
+            # For non-Waveshare boards, perform full recalibration
+            if not self.is_waveshare:
+                # Full calibration sequence like initialization
+                self.lora.setDio3TcxoCtrl(self.lora.DIO3_OUTPUT_1_8, self.lora.TCXO_DELAY_5)
+                self.lora.setRegulatorMode(self.lora.REGULATOR_DC_DC)
+                self.lora.calibrate(0x7F)  # Full calibration
+                self.lora.setDio2RfSwitch()
+            else:
+                # Waveshare minimal recalibration
+                self.lora._fixResistanceAntenna()
+                self.lora.calibrate(0x7F)
+            
+            # Restore RX mode
+            rx_mask = self._get_rx_irq_mask()
+            self.lora.setDioIrqParams(rx_mask, rx_mask, self.lora.IRQ_NONE, self.lora.IRQ_NONE)
+            self.lora.setRx(self.lora.RX_CONTINUOUS)
+            
+            time.sleep(0.1)  # Let everything settle
+            logger.info("Manual AGC reset completed")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Failed to reset AGC: {e}")
+            return False
 
     def set_frequency(self, frequency: int) -> bool:
         """Set operating frequency"""
