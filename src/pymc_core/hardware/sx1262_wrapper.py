@@ -461,19 +461,18 @@ class SX1262Radio(LoRaRadio):
 
                     # Log every 500 checks (roughly every 5 seconds) to show RX task is alive
                     if rx_check_count % 500 == 0:
-                        # Keep one minimal status message
+                        # Use our safe get_noise_floor method instead of direct getRssiInst
                         try:
-                            raw_rssi = self.lora.getRssiInst()
-                            if raw_rssi is not None:
-                                noise_floor_dbm = -(float(raw_rssi) / 2)
+                            noise_floor = self.get_noise_floor()
+                            if noise_floor is not None:
                                 logger.debug(
                                     f"[RX Task] Status check #{rx_check_count}, "
-                                    f"Noise: {noise_floor_dbm:.1f}dBm"
+                                    f"Noise: {noise_floor:.1f}dBm"
                                 )
                             else:
-                                logger.debug(f"[RX Task] Status check #{rx_check_count}")
-                        except Exception:
-                            logger.debug(f"[RX Task] Status check #{rx_check_count}")
+                                logger.debug(f"[RX Task] Status check #{rx_check_count}, Noise: N/A")
+                        except Exception as e:
+                            logger.debug(f"[RX Task] Status check #{rx_check_count}, Noise read error: {e}")
             else:
                 await asyncio.sleep(0.1)  # Longer delay when interrupts not set up
 
