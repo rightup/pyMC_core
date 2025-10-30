@@ -917,8 +917,27 @@ class SX1262Radio(LoRaRadio):
         """Restore radio to RX continuous mode after transmission"""
         try:
             if self.lora:
+                logger.debug("[TX→RX] Starting TX to RX mode transition with AGC restoration")
+                
                 # Add a small delay to ensure radio is ready to transition to RX
                 await asyncio.sleep(0.01)
+                
+                # CRITICAL: Force AGC recalibration during TX→RX transition
+                # This prevents the AGC corruption that causes stuck noise floor readings
+                try:
+                    # Set to standby first
+                    self.lora.setStandby(self.lora.STANDBY_RC)
+                    await asyncio.sleep(0.05)  # Let radio settle
+                    
+                    # Recalibrate AGC - this is the key fix
+                    self.lora.calibrate(0x7F)  # Full calibration including AGC
+                    logger.debug("[TX→RX] AGC recalibration completed")
+                    
+                    # Set RF switch back to RX mode
+                    self._control_tx_rx_pins(tx_mode=False)
+                    
+                except Exception as e:
+                    logger.warning(f"[TX→RX] AGC recalibration failed: {e}")
 
                 # Reconfigure RX interrupts before setting RX mode
                 rx_mask = self._get_rx_irq_mask()
@@ -933,6 +952,8 @@ class SX1262Radio(LoRaRadio):
                 irqStat = self.lora.getIrqStatus()
                 if irqStat != 0:
                     self.lora.clearIrqStatus(irqStat)
+                
+                logger.debug("[TX→RX] TX to RX mode transition completed with AGC restoration")
 
         except Exception as e:
             logger.warning(f"Failed to set RX mode after TX: {e}")
