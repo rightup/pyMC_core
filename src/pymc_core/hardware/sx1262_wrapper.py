@@ -961,8 +961,15 @@ class SX1262Radio(LoRaRadio):
             raw_rssi = self.lora.getRssiInst()
             if raw_rssi is not None:
                 noise_floor_dbm = -(float(raw_rssi) / 2)
-                # Validate reading - reject obviously invalid values
+                
+                # Validate reading - reject obviously invalid values OR stuck AGC
                 if -150.0 <= noise_floor_dbm <= -50.0:
+                    # Check for stuck AGC pattern (noise floor stuck at -75 to -80dBm range)
+                    if -80.0 <= noise_floor_dbm <= -75.0:
+                        # This looks like stuck AGC - trigger reset
+                        logger.warning(f"Suspected stuck AGC reading: {noise_floor_dbm:.1f}dBm - resetting radio")
+                        self._reset_radio_state()
+                        return None
                     return noise_floor_dbm
                 else:
                     # Invalid reading detected - trigger radio state reset
