@@ -1272,63 +1272,156 @@ class SX1262Radio(LoRaRadio):
         try:
             logger.info("Starting comprehensive AGC system restoration")
             
-            # Step 1: Force radio to standby and clear all state
-            self.lora.setStandby(self.lora.STANDBY_RC)
-            await asyncio.sleep(0.1)  # Let radio settle completely
+            # Record pre-restoration noise floor for comparison
+            pre_noise = self.get_noise_floor()
+            logger.info(f"Pre-restoration noise floor: {pre_noise:.1f}dBm" if pre_noise else "Pre-restoration noise floor: N/A")
             
-            # Step 2: Clear all interrupt flags
-            self.lora.clearIrqStatus(0xFFFF)
+            # Step 1: Multiple standby cycles to fully reset radio state
+            for i in range(3):
+                self.lora.setStandby(self.lora.STANDBY_RC)
+                await asyncio.sleep(0.05)
+                
+            # Step 2: Clear all interrupt flags multiple times
+            for i in range(2):
+                self.lora.clearIrqStatus(0xFFFF)
+                await asyncio.sleep(0.01)
             
-            # Step 3: Reset RF switch pins
+            # Step 3: Reset RF switch pins and ensure they're properly set
             self._control_tx_rx_pins(tx_mode=False)
+            await asyncio.sleep(0.05)
             
-            # Step 4: Comprehensive hardware recalibration
+            # Step 4: More aggressive hardware recalibration with multiple attempts
             if not self.is_waveshare:
-                # Full hardware reset sequence for non-Waveshare boards
-                logger.debug("Performing full hardware recalibration sequence")
-                self.lora.setDio3TcxoCtrl(self.lora.DIO3_OUTPUT_1_8, self.lora.TCXO_DELAY_5)
-                self.lora.setRegulatorMode(self.lora.REGULATOR_DC_DC)
+                logger.debug("Performing aggressive full hardware recalibration sequence")
                 
-                # Full calibration including all RF blocks
-                self.lora.calibrate(0x7F)  # All calibration blocks
-                await asyncio.sleep(0.1)  # Calibration needs time
+                # Multiple initialization cycles to break AGC corruption
+                for attempt in range(2):
+                    logger.debug(f"Hardware recalibration attempt {attempt + 1}/2")
+                    
+                    self.lora.setDio3TcxoCtrl(self.lora.DIO3_OUTPUT_1_8, self.lora.TCXO_DELAY_5)
+                    await asyncio.sleep(0.02)
+                    
+                    self.lora.setRegulatorMode(self.lora.REGULATOR_DC_DC)
+                    await asyncio.sleep(0.02)
+                    
+                    # Multiple calibration cycles
+                    self.lora.calibrate(0x7F)  # All calibration blocks
+                    await asyncio.sleep(0.1)
+                    
+                    # Additional AGC-specific calibrations if available
+                    try:
+                        # Try AGC-only calibration (0x01 = Image calibration which affects AGC)
+                        self.lora.calibrate(0x01)
+                        await asyncio.sleep(0.05)
+                    except:
+                        pass
+                    
+                    self.lora.setDio2RfSwitch()
+                    await asyncio.sleep(0.02)
                 
-                self.lora.setDio2RfSwitch()
-                
-                # Step 5: Force proper AGC register initialization
+                # Step 5: Force proper AGC register initialization with verification
                 try:
                     # Set RX gain register to proper power saving mode
                     self.lora.writeRegister(self.lora.REG_RX_GAIN, (self.lora.RX_GAIN_POWER_SAVING,), 1)
-                    logger.debug("RX gain register restored")
+                    await asyncio.sleep(0.01)
+                    
+                    # Verify the register was actually written
+                    verify_reg = self.lora.readRegister(self.lora.REG_RX_GAIN, 1)
+                    if verify_reg and verify_reg[0] != 0x00:
+                        logger.debug(f"RX gain register restored and verified: 0x{verify_reg[0]:02X}")
+                    else:
+                        logger.warning("RX gain register verification failed - may still be corrupted")
+                        
                 except Exception as e:
                     logger.warning(f"Failed to restore RX gain register: {e}")
                     
+                # Step 6: Try to force other AGC-related registers to proper states
+                try:
+                    # Attempt to write to AGC control registers if accessible
+                    # Register 0x0891: AGC control - try to enable AGC
+                    self.lora.writeRegister(0x0891, (0x01,), 1)
+                    await asyncio.sleep(0.01)
+                    logger.debug("AGC control register restoration attempted")
+                except Exception as e:
+                    logger.debug(f"AGC control register write failed (expected): {e}")
+                    
             else:
-                # Waveshare minimal recalibration with enhanced AGC focus  
-                logger.debug("Performing Waveshare-specific AGC restoration")
-                self.lora._fixResistanceAntenna()
-                self.lora.calibrate(0x7F)
-                await asyncio.sleep(0.1)
+                # Waveshare enhanced recalibration with multiple cycles
+                logger.debug("Performing enhanced Waveshare-specific AGC restoration")
+                
+                for attempt in range(2):
+                    logger.debug(f"Waveshare recalibration attempt {attempt + 1}/2")
+                    self.lora._fixResistanceAntenna()
+                    await asyncio.sleep(0.02)
+                    
+                    self.lora.calibrate(0x7F)
+                    await asyncio.sleep(0.1)
+                    
+                    # Additional calibration cycle
+                    try:
+                        self.lora.calibrate(0x01)  # Image calibration
+                        await asyncio.sleep(0.05)
+                    except:
+                        pass
             
-            # Step 6: Re-initialize modulation parameters (AGC depends on these)
+            # Step 7: Re-initialize modulation parameters multiple times
             symbol_duration_ms = (2**self.spreading_factor) / (self.bandwidth / 1000)
             ldro = symbol_duration_ms > 16.0
-            self.lora.setLoRaModulation(
-                self.spreading_factor, self.bandwidth, self.coding_rate, ldro
-            )
             
-            # Step 7: Restore proper interrupt configuration
+            for i in range(2):
+                self.lora.setLoRaModulation(
+                    self.spreading_factor, self.bandwidth, self.coding_rate, ldro
+                )
+                await asyncio.sleep(0.02)
+            
+            # Step 8: Restore proper interrupt configuration
             rx_mask = self._get_rx_irq_mask()
             self.lora.setDioIrqParams(rx_mask, rx_mask, self.lora.IRQ_NONE, self.lora.IRQ_NONE)
+            await asyncio.sleep(0.02)
             
-            # Step 8: Return to RX continuous mode
+            # Step 9: Return to RX continuous mode with verification
             self.lora.setRx(self.lora.RX_CONTINUOUS)
+            await asyncio.sleep(0.1)
             
-            # Step 9: Extended settling time for AGC stabilization
-            await asyncio.sleep(0.2)  # AGC needs time to stabilize
+            # Verify radio is actually in RX mode
+            mode = self.lora.getMode()
+            if mode == 80:  # RX continuous mode
+                logger.debug("Radio confirmed in RX continuous mode")
+            else:
+                logger.warning(f"Radio not in expected RX mode (mode: {mode})")
+            
+            # Step 10: Extended settling time with progressive verification
+            logger.debug("Allowing extended AGC stabilization time...")
+            for i in range(5):
+                await asyncio.sleep(0.1)
+                # Check if noise floor is improving during settling
+                current_noise = self.get_noise_floor()
+                if current_noise and current_noise < -100.0:
+                    logger.debug(f"AGC stabilizing: {current_noise:.1f}dBm (attempt {i+1})")
+                    break
+            
+            # Final verification
+            post_noise = self.get_noise_floor()
+            logger.info(f"Post-restoration noise floor: {post_noise:.1f}dBm" if post_noise else "Post-restoration noise floor: N/A")
+            
+            # Check if restoration was successful
+            success = False
+            if pre_noise and post_noise:
+                improvement = abs(post_noise - pre_noise)
+                if post_noise < -100.0:  # Good noise floor
+                    success = True
+                    logger.info(f"AGC restoration successful: {pre_noise:.1f} -> {post_noise:.1f}dBm")
+                elif improvement > 5.0:  # Some improvement
+                    success = True
+                    logger.info(f"AGC restoration partially successful: {pre_noise:.1f} -> {post_noise:.1f}dBm (improvement: {improvement:.1f}dB)")
+                else:
+                    logger.warning(f"AGC restoration ineffective: {pre_noise:.1f} -> {post_noise:.1f}dBm")
+            elif post_noise and post_noise < -100.0:
+                success = True
+                logger.info("AGC restoration appears successful based on final reading")
             
             logger.info("AGC system restoration sequence completed")
-            return True
+            return success
             
         except Exception as e:
             logger.error(f"Failed to restore AGC system: {e}")
