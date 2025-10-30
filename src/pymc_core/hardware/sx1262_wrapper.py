@@ -505,6 +505,32 @@ class SX1262Radio(LoRaRadio):
                                         diag_data = self._collect_radio_diagnostics()
                                         logger.info(f"Radio diagnostics at corruption: {diag_data}")
                                         
+                                        # Check if AGC registers are corrupted (all showing 0x00)
+                                        agc_corrupted = (
+                                            diag_data.get("rx_gain_reg") == "0x00" and
+                                            diag_data.get("agc_ctrl_reg") == "0x00" and 
+                                            diag_data.get("agc_config_reg") == "0x00"
+                                        )
+                                        
+                                        if agc_corrupted:
+                                            logger.error("AGC REGISTER CORRUPTION DETECTED! All AGC registers showing 0x00 - attempting immediate restoration")
+                                            # Attempt immediate AGC restoration
+                                            try:
+                                                success = await self._restore_agc_system()
+                                                if success:
+                                                    logger.info("AGC system restoration completed successfully")
+                                                    # Verify restoration worked
+                                                    await asyncio.sleep(0.1)
+                                                    new_noise_floor = self.get_noise_floor()
+                                                    if new_noise_floor and new_noise_floor < -100.0:
+                                                        logger.info(f"AGC restoration verified - noise floor now: {new_noise_floor:.1f}dBm")
+                                                    else:
+                                                        logger.warning(f"AGC restoration may have failed - noise floor still: {new_noise_floor:.1f}dBm")
+                                                else:
+                                                    logger.error("AGC system restoration failed")
+                                            except Exception as e:
+                                                logger.error(f"AGC restoration attempt failed: {e}")
+                                        
                                         # Log recent history
                                         if self._noise_floor_history:
                                             logger.info(f"Recent noise floor history: {[f'{x:.1f}' for x in self._noise_floor_history[-5:]]}")
@@ -1232,6 +1258,81 @@ class SX1262Radio(LoRaRadio):
             logger.debug("Radio state reset completed")
         except Exception as e:
             logger.warning(f"Failed to reset radio state: {e}")
+
+    async def _restore_agc_system(self) -> bool:
+        """
+        Advanced AGC system restoration for when AGC registers are corrupted.
+        This addresses the root cause of persistent noise floor corruption.
+        Returns True if restoration was successful.
+        """
+        if not self._initialized or self.lora is None:
+            logger.warning("Cannot restore AGC system - radio not initialized")
+            return False
+            
+        try:
+            logger.info("Starting comprehensive AGC system restoration")
+            
+            # Step 1: Force radio to standby and clear all state
+            self.lora.setStandby(self.lora.STANDBY_RC)
+            await asyncio.sleep(0.1)  # Let radio settle completely
+            
+            # Step 2: Clear all interrupt flags
+            self.lora.clearIrqStatus(0xFFFF)
+            
+            # Step 3: Reset RF switch pins
+            self._control_tx_rx_pins(tx_mode=False)
+            
+            # Step 4: Comprehensive hardware recalibration
+            if not self.is_waveshare:
+                # Full hardware reset sequence for non-Waveshare boards
+                logger.debug("Performing full hardware recalibration sequence")
+                self.lora.setDio3TcxoCtrl(self.lora.DIO3_OUTPUT_1_8, self.lora.TCXO_DELAY_5)
+                self.lora.setRegulatorMode(self.lora.REGULATOR_DC_DC)
+                
+                # Full calibration including all RF blocks
+                self.lora.calibrate(0x7F)  # All calibration blocks
+                await asyncio.sleep(0.1)  # Calibration needs time
+                
+                self.lora.setDio2RfSwitch()
+                
+                # Step 5: Force proper AGC register initialization
+                try:
+                    # Set RX gain register to proper power saving mode
+                    self.lora.writeRegister(self.lora.REG_RX_GAIN, (self.lora.RX_GAIN_POWER_SAVING,), 1)
+                    logger.debug("RX gain register restored")
+                except Exception as e:
+                    logger.warning(f"Failed to restore RX gain register: {e}")
+                    
+            else:
+                # Waveshare minimal recalibration with enhanced AGC focus  
+                logger.debug("Performing Waveshare-specific AGC restoration")
+                self.lora._fixResistanceAntenna()
+                self.lora.calibrate(0x7F)
+                await asyncio.sleep(0.1)
+            
+            # Step 6: Re-initialize modulation parameters (AGC depends on these)
+            symbol_duration_ms = (2**self.spreading_factor) / (self.bandwidth / 1000)
+            ldro = symbol_duration_ms > 16.0
+            self.lora.setLoRaModulation(
+                self.spreading_factor, self.bandwidth, self.coding_rate, ldro
+            )
+            
+            # Step 7: Restore proper interrupt configuration
+            rx_mask = self._get_rx_irq_mask()
+            self.lora.setDioIrqParams(rx_mask, rx_mask, self.lora.IRQ_NONE, self.lora.IRQ_NONE)
+            
+            # Step 8: Return to RX continuous mode
+            self.lora.setRx(self.lora.RX_CONTINUOUS)
+            
+            # Step 9: Extended settling time for AGC stabilization
+            await asyncio.sleep(0.2)  # AGC needs time to stabilize
+            
+            logger.info("AGC system restoration sequence completed")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Failed to restore AGC system: {e}")
+            return False
 
     def reset_agc(self) -> bool:
         """
