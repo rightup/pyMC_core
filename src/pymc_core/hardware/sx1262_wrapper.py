@@ -989,6 +989,12 @@ class SX1262Radio(LoRaRadio):
             if irq_status != 0:
                 self.lora.clearIrqStatus(irq_status)
             
+            # Set RF switch to RX mode
+            self._control_tx_rx_pins(tx_mode=False)
+            
+            # Perform full calibration to reset AGC (SX1262 equivalent of RadioLib's automatic reset)
+            self.lora.calibrate(0x7F)
+            
             # Restore RX mode
             rx_mask = self._get_rx_irq_mask()
             self.lora.setDioIrqParams(rx_mask, rx_mask, self.lora.IRQ_NONE, self.lora.IRQ_NONE)
