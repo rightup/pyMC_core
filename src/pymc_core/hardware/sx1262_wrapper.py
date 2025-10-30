@@ -446,10 +446,18 @@ class SX1262Radio(LoRaRadio):
                         last_preamble_time > 0
                         and (current_time - last_preamble_time) > preamble_timeout
                     ):
-                        logger.debug(
+                        logger.warning(
                             f"[RX Task] Preamble timeout detected - {preamble_timeout}s "
-                            f"elapsed since preamble, resetting radio"
+                            f"elapsed since preamble, resetting radio. This may trigger AGC corruption!"
                         )
+                        
+                        # Capture noise floor BEFORE preamble timeout reset
+                        try:
+                            pre_reset_noise = self.get_noise_floor()
+                            logger.info(f"[PREAMBLE RESET] Noise floor BEFORE reset: {pre_reset_noise:.1f}dBm")
+                        except Exception as e:
+                            logger.warning(f"[PREAMBLE RESET] Failed to read pre-reset noise floor: {e}")
+                        
                         try:
                             # Force radio back to RX mode to clear any stuck state
                             self.lora.setRx(self.lora.RX_CONTINUOUS)
@@ -461,6 +469,23 @@ class SX1262Radio(LoRaRadio):
                             logger.error(
                                 f"[RX Task] Failed to reset radio after preamble timeout: {e}"
                             )
+                        
+                        # Capture noise floor AFTER preamble timeout reset
+                        try:
+                            await asyncio.sleep(0.1)  # Let radio settle
+                            post_reset_noise = self.get_noise_floor()
+                            logger.info(f"[PREAMBLE RESET] Noise floor AFTER reset: {post_reset_noise:.1f}dBm")
+                            
+                            if pre_reset_noise and post_reset_noise:
+                                change = abs(post_reset_noise - pre_reset_noise)
+                                if change > 5.0:
+                                    logger.error(f"[PREAMBLE RESET] CORRUPTION DETECTED! Preamble reset caused {change:.1f}dBm change")
+                                    # Collect diagnostics immediately
+                                    diag_data = self._collect_radio_diagnostics()
+                                    logger.error(f"[PREAMBLE RESET] Post-reset diagnostics: {diag_data}")
+                        except Exception as e:
+                            logger.warning(f"[PREAMBLE RESET] Failed to read post-reset noise floor: {e}")
+                        
                         last_preamble_time = 0  # Reset preamble timer
 
                     # Log every 500 checks (roughly every 5 seconds) to show RX task is alive
@@ -1088,13 +1113,13 @@ class SX1262Radio(LoRaRadio):
             except Exception as e:
                 diag["gpio_error"] = str(e)
                 
-            # Register readings (if available)
+            # Register readings (if available) - focus on AGC-related registers
             try:
                 # Try to read some key registers that might indicate AGC issues
                 # Note: These may not be available in all driver versions
                 if hasattr(self.lora, 'readRegister'):
                     try:
-                        # RX gain register
+                        # RX gain register (most important for AGC issues)
                         rx_gain = self.lora.readRegister(self.lora.REG_RX_GAIN, 1)
                         if rx_gain:
                             diag["rx_gain_reg"] = f"0x{rx_gain[0]:02X}"
@@ -1106,6 +1131,39 @@ class SX1262Radio(LoRaRadio):
                         random_reg = self.lora.readRegister(0x0819, 1)  # Random number register
                         if random_reg:
                             diag["random_reg"] = f"0x{random_reg[0]:02X}"
+                    except:
+                        pass
+                        
+                    try:
+                        # AGC-related registers for SX1262
+                        # Register 0x0891: AGC control
+                        agc_ctrl = self.lora.readRegister(0x0891, 1)
+                        if agc_ctrl:
+                            diag["agc_ctrl_reg"] = f"0x{agc_ctrl[0]:02X}"
+                    except:
+                        pass
+                        
+                    try:
+                        # Register 0x0892: AGC configuration 
+                        agc_config = self.lora.readRegister(0x0892, 1)
+                        if agc_config:
+                            diag["agc_config_reg"] = f"0x{agc_config[0]:02X}"
+                    except:
+                        pass
+                        
+                    try:
+                        # Register 0x089B: LNA gain setting
+                        lna_gain = self.lora.readRegister(0x089B, 1)
+                        if lna_gain:
+                            diag["lna_gain_reg"] = f"0x{lna_gain[0]:02X}"
+                    except:
+                        pass
+                        
+                    try:
+                        # Register 0x08AC: Manual gain setting
+                        manual_gain = self.lora.readRegister(0x08AC, 1)
+                        if manual_gain:
+                            diag["manual_gain_reg"] = f"0x{manual_gain[0]:02X}"
                     except:
                         pass
             except Exception as e:
