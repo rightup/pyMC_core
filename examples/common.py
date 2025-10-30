@@ -81,11 +81,11 @@ def create_radio(radio_type: str = "waveshare", serial_port: str = "/dev/ttyUSB0
                 "irq_pin": 16,
                 "txen_pin": 13,  # GPIO 13 for TX enable
                 "rxen_pin": 12,
-                "frequency": int(869.525 * 1000000),  # EU: 869.525 MHz
+                "frequency": int(869.618 * 1000000),  # EU: 869.618 MHz
                 "tx_power": 22,
-                "spreading_factor": 11,
-                "bandwidth": int(250 * 1000),
-                "coding_rate": 5,
+                "spreading_factor": 8,
+                "bandwidth": int(62.5 * 1000),
+                "coding_rate": 8,
                 "preamble_length": 17,
                 "is_waveshare": True,
             },
