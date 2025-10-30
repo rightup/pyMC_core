@@ -184,6 +184,10 @@ class SX1262Radio(LoRaRadio):
         self._initialized = False
         self._rx_lock = asyncio.Lock()
         self._tx_lock = asyncio.Lock()
+        
+        # Noise floor monitoring for debugging
+        self._last_noise_floor: Optional[float] = None
+        self._noise_floor_history: list = []  # Keep last 10 readings
 
         # GPIO management
         self._gpio_manager = GPIOPinManager()
@@ -460,15 +464,46 @@ class SX1262Radio(LoRaRadio):
                         last_preamble_time = 0  # Reset preamble timer
 
                     # Log every 500 checks (roughly every 5 seconds) to show RX task is alive
-                    if rx_check_count % 500 == 0:
+                    # Also check every 100 checks (1 second) for noise floor corruption
+                    if rx_check_count % 100 == 0 or rx_check_count % 500 == 0:
                         # Use our safe get_noise_floor method instead of direct getRssiInst
                         try:
                             noise_floor = self.get_noise_floor()
                             if noise_floor is not None:
-                                logger.debug(
-                                    f"[RX Task] Status check #{rx_check_count}, "
-                                    f"Noise: {noise_floor:.1f}dBm"
-                                )
+                                # Debug noise floor changes
+                                if self._last_noise_floor is not None:
+                                    change = abs(noise_floor - self._last_noise_floor)
+                                    if change > 5.0:  # Log significant changes (>5dBm)
+                                        logger.warning(f"NOISE FLOOR CHANGE DETECTED: {self._last_noise_floor:.1f} -> {noise_floor:.1f} dBm (change: {change:.1f} dBm)")
+                                        
+                                        # Collect comprehensive radio diagnostics
+                                        diag_data = self._collect_radio_diagnostics()
+                                        logger.info(f"Radio diagnostics at corruption: {diag_data}")
+                                        
+                                        # Log recent history
+                                        if self._noise_floor_history:
+                                            logger.info(f"Recent noise floor history: {[f'{x:.1f}' for x in self._noise_floor_history[-5:]]}")
+                                
+                                # Update tracking
+                                self._last_noise_floor = noise_floor
+                                self._noise_floor_history.append(noise_floor)
+                                if len(self._noise_floor_history) > 10:
+                                    self._noise_floor_history.pop(0)
+                                
+                                # More detailed logging every 5 seconds, basic every 1 second
+                                if rx_check_count % 500 == 0:
+                                    # Detailed diagnostic every 5 seconds
+                                    diag_summary = self._collect_radio_diagnostics()
+                                    key_info = {
+                                        "noise": f"{noise_floor:.1f}dBm",
+                                        "mode": diag_summary.get("radio_mode", "unknown"),
+                                        "irq": diag_summary.get("irq_status", "unknown"),
+                                        "busy": diag_summary.get("busy_status", "unknown")
+                                    }
+                                    logger.debug(f"[RX Task] Status check #{rx_check_count}: {key_info}")
+                                else:
+                                    # Basic logging every 1 second
+                                    logger.debug(f"[RX Task] Check #{rx_check_count}, Noise: {noise_floor:.1f}dBm")
                             else:
                                 logger.debug(f"[RX Task] Status check #{rx_check_count}, Noise: N/A")
                         except Exception as e:
@@ -980,6 +1015,120 @@ class SX1262Radio(LoRaRadio):
         except Exception as e:
             logger.debug(f"Failed to read noise floor: {e}")
             return None
+
+    def _collect_radio_diagnostics(self) -> dict:
+        """
+        Collect comprehensive radio diagnostics for debugging noise floor corruption.
+        Returns a dictionary with various radio parameters and status information.
+        """
+        diag = {"timestamp": time.time()}
+        
+        if not self._initialized or self.lora is None:
+            diag["error"] = "Radio not initialized"
+            return diag
+            
+        try:
+            # Basic radio mode and status
+            try:
+                diag["radio_mode"] = self.lora.getMode()
+            except Exception as e:
+                diag["radio_mode_error"] = str(e)
+                
+            try:
+                diag["irq_status"] = f"0x{self.lora.getIrqStatus():04X}"
+            except Exception as e:
+                diag["irq_status_error"] = str(e)
+                
+            try:
+                diag["busy_status"] = self.lora.busyCheck()
+            except Exception as e:
+                diag["busy_status_error"] = str(e)
+            
+            # RF parameters and readings
+            try:
+                # Multiple RSSI readings to check consistency
+                rssi_readings = []
+                for i in range(3):
+                    raw_rssi = self.lora.getRssiInst()
+                    if raw_rssi is not None:
+                        rssi_readings.append(-(float(raw_rssi) / 2))
+                    time.sleep(0.01)  # Small delay between readings
+                diag["rssi_readings"] = [f"{r:.1f}" for r in rssi_readings]
+                if rssi_readings:
+                    diag["rssi_variance"] = f"{max(rssi_readings) - min(rssi_readings):.1f}"
+            except Exception as e:
+                diag["rssi_error"] = str(e)
+                
+            # Current radio configuration
+            try:
+                diag["frequency"] = f"{self.frequency/1e6:.3f}MHz"
+                diag["bandwidth"] = f"{self.bandwidth/1000:.0f}kHz"
+                diag["spreading_factor"] = self.spreading_factor
+                diag["tx_power"] = f"{self.tx_power}dBm"
+            except Exception as e:
+                diag["config_error"] = str(e)
+                
+            # GPIO pin states (if accessible)
+            try:
+                pin_states = {}
+                if self._txen_pin_setup and self.txen_pin != -1:
+                    try:
+                        pin_states["txen"] = "high" if self._gpio_manager._pins[self.txen_pin].value else "low"
+                    except:
+                        pin_states["txen"] = "unknown"
+                        
+                if hasattr(self, "_rxen_pin_setup") and self._rxen_pin_setup and self.rxen_pin != -1:
+                    try:
+                        pin_states["rxen"] = "high" if self._gpio_manager._pins[self.rxen_pin].value else "low"
+                    except:
+                        pin_states["rxen"] = "unknown"
+                        
+                if pin_states:
+                    diag["gpio_pins"] = pin_states
+            except Exception as e:
+                diag["gpio_error"] = str(e)
+                
+            # Register readings (if available)
+            try:
+                # Try to read some key registers that might indicate AGC issues
+                # Note: These may not be available in all driver versions
+                if hasattr(self.lora, 'readRegister'):
+                    try:
+                        # RX gain register
+                        rx_gain = self.lora.readRegister(self.lora.REG_RX_GAIN, 1)
+                        if rx_gain:
+                            diag["rx_gain_reg"] = f"0x{rx_gain[0]:02X}"
+                    except:
+                        pass
+                        
+                    try:
+                        # Random number generator (indicates RF activity)
+                        random_reg = self.lora.readRegister(0x0819, 1)  # Random number register
+                        if random_reg:
+                            diag["random_reg"] = f"0x{random_reg[0]:02X}"
+                    except:
+                        pass
+            except Exception as e:
+                diag["register_error"] = str(e)
+                
+            # Packet statistics if available
+            try:
+                if hasattr(self, 'last_rssi') and hasattr(self, 'last_snr'):
+                    diag["last_packet"] = {"rssi": self.last_rssi, "snr": self.last_snr}
+            except Exception as e:
+                diag["packet_stats_error"] = str(e)
+                
+            # Lock states
+            try:
+                diag["tx_locked"] = self._tx_lock.locked() if hasattr(self, '_tx_lock') else False
+                diag["rx_locked"] = self._rx_lock.locked() if hasattr(self, '_rx_lock') else False
+            except Exception as e:
+                diag["lock_error"] = str(e)
+                
+        except Exception as e:
+            diag["collection_error"] = str(e)
+            
+        return diag
 
     def _reset_radio_state(self) -> None:
         """Reset radio state to recover from invalid RSSI readings"""
