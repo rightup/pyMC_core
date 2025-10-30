@@ -192,6 +192,7 @@ class SX1262Radio(LoRaRadio):
 
         self._tx_done_event = asyncio.Event()
         self._rx_done_event = asyncio.Event()
+        self._cad_event = asyncio.Event()
 
         logger.info(
             f"SX1262Radio configured: freq={frequency/1e6:.1f}MHz, "
@@ -270,6 +271,14 @@ class SX1262Radio(LoRaRadio):
             if irqStat & self.lora.IRQ_TX_DONE:
                 logger.debug("[TX] TX_DONE interrupt (0x{:04X})".format(self.lora.IRQ_TX_DONE))
                 self._tx_done_event.set()
+
+            # Check for CAD interrupts
+            cad_detected_flag = getattr(self.lora, 'IRQ_CAD_DETECTED', 0x4000)
+            cad_done_flag = getattr(self.lora, 'IRQ_CAD_DONE', 0x8000)
+            if irqStat & (cad_detected_flag | cad_done_flag):
+                logger.debug(f"[CAD] CAD interrupt detected (0x{irqStat:04X})")
+                if hasattr(self, '_cad_event'):
+                    self._cad_event.set()
 
             # Check each RX interrupt type separately for better debugging
             rx_interrupts = self._get_rx_irq_mask()
@@ -1018,6 +1027,134 @@ class SX1262Radio(LoRaRadio):
                 status["hardware_ready"] = False
 
         return status
+    
+
+
+
+    def _get_thresholds_for_current_settings(self) -> tuple[int, int]:
+        """Fetch CAD thresholds for the current spreading factor.
+        Returns (cadDetPeak, cadDetMin).
+        """
+
+        # Default CAD thresholds by SF (based on Semtech TR013 recommendations)
+        DEFAULT_CAD_THRESHOLDS = {
+            7: (22, 10),
+            8: (22, 10),
+            9: (24, 10),
+            10: (25, 10),
+            11: (26, 10),
+            12: (30, 10),
+        }
+
+        # Fall back to SF7 values if unknown
+        return DEFAULT_CAD_THRESHOLDS.get(self.spreading_factor, (22, 10))
+
+
+
+
+    async def perform_cad(
+        self,
+        det_peak: int | None = None,
+        det_min: int | None = None,
+        timeout: float = 1.0,
+        calibration: bool = False,
+    ) -> bool | dict:
+        """
+        Perform Channel Activity Detection (CAD).
+        If calibration=True, uses provided thresholds and returns detailed info.
+        If calibration=False, uses pre-calibrated/default thresholds.
+        
+        Returns:
+            bool: Channel activity detected (when calibration=False)
+            dict: Calibration data (when calibration=True)
+        """
+        if not self._initialized:
+            raise RuntimeError("Radio not initialized")
+        
+        if not self.lora:
+            raise RuntimeError("LoRa radio object not available")
+
+        # Choose thresholds
+        if det_peak is None or det_min is None:
+            det_peak, det_min = self._get_thresholds_for_current_settings()
+        
+        try:
+            # Clear any existing interrupt flags
+            existing_irq = self.lora.getIrqStatus()
+            if existing_irq != 0:
+                self.lora.clearIrqStatus(existing_irq)
+            
+            # Clear CAD event before starting
+            self._cad_event.clear()
+            
+            # Start CAD operation using the driver's start_cad method
+            self.lora.start_cad(det_peak, det_min)
+
+            # Wait for CAD completion
+            try:
+                await asyncio.wait_for(self._cad_event.wait(), timeout=timeout)
+                self._cad_event.clear()
+                
+                # Read interrupt status
+                irq = self.lora.getIrqStatus()
+                self.lora.clearIrqStatus(irq)
+
+                # Check for CAD detection
+                cad_detected_flag = getattr(self.lora, 'IRQ_CAD_DETECTED', 0x4000)
+                detected = bool(irq & cad_detected_flag)
+
+                if calibration:
+                    return {
+                        "sf": self.spreading_factor,
+                        "bw": self.bandwidth,
+                        "det_peak": det_peak,
+                        "det_min": det_min,
+                        "detected": detected,
+                        "timestamp": time.time(),
+                        "irq_status": irq
+                    }
+                else:
+                    return detected
+
+            except asyncio.TimeoutError:
+                logger.debug("CAD operation timed out")
+                if calibration:
+                    return {
+                        "sf": self.spreading_factor,
+                        "bw": self.bandwidth,
+                        "det_peak": det_peak,
+                        "det_min": det_min,
+                        "detected": False,
+                        "timestamp": time.time(),
+                        "timeout": True
+                    }
+                else:
+                    return False
+                    
+        except Exception as e:
+            logger.error(f"CAD operation failed: {e}")
+            if calibration:
+                return {
+                    "sf": self.spreading_factor,
+                    "bw": self.bandwidth,
+                    "det_peak": det_peak,
+                    "det_min": det_min,
+                    "detected": False,
+                    "timestamp": time.time(),
+                    "error": str(e)
+                }
+            else:
+                return False
+        finally:
+            # Restore RX mode after CAD
+            try:
+                rx_mask = self._get_rx_irq_mask()
+                self.lora.setDioIrqParams(rx_mask, rx_mask, self.lora.IRQ_NONE, self.lora.IRQ_NONE)
+                self.lora.setRx(self.lora.RX_CONTINUOUS)
+            except Exception as e:
+                logger.warning(f"Failed to restore RX mode after CAD: {e}")
+
+
 
     def cleanup(self) -> None:
         """Clean up radio resources"""
