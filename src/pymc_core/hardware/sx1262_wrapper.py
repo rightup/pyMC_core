@@ -755,16 +755,21 @@ class SX1262Radio(LoRaRadio):
                     if lbt_attempts < max_lbt_attempts:
                         # Channel busy, wait random backoff before trying again
                         # this may confilict with dispatcher will need testing.
-                        backoff_ms = 50 + (lbt_attempts * 20)  # 50ms, 70ms, 90ms, etc.
+                        # Channel busy, wait backoff before trying again (MeshCore-inspired)
+                        import random
+
+                        base_delay = random.randint(120, 240)
+                        backoff_ms = base_delay + (
+                            lbt_attempts * 50
+                        )  # Progressive: 120-290ms, 170-340ms, etc.
                         logger.debug(
-                            f"Channel busy (CAD detected activity), backing off {backoff_ms}ms",
-                            f">>>>>>> attempt {lbt_attempts} <<<<<<<",
+                            f"Channel busy (CAD detected activity), backing off {backoff_ms}ms"
+                            f" - >>>>>>> attempt {lbt_attempts} <<<<<<<",
                         )
                         await asyncio.sleep(backoff_ms / 1000.0)
                     else:
                         logger.warning(
-                            f"Channel still busy after {max_lbt_attempts} CAD attempts",
-                            "transmitting anyway",
+                            f"Channel still busy after {max_lbt_attempts} CAD attempts - tx anyway"
                         )
             except Exception as e:
                 logger.debug(f"CAD check failed: {e}, proceeding with transmission")
