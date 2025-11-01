@@ -1,377 +1,335 @@
 #!/usr/bin/env python3
 """
-CAD Calibration Example: Calibrate Channel Activity Detection thresholds.
-
-This example helps calibrate CAD (Channel Activity Detection) thresholds
-for optimal performance. It performs multiple CAD operations with different
-threshold values and provides recommendations.
-
-Note: This example only works with SX1262 radios, not KISS TNC devices.
+CAD Calibration Tool - Improved staged calibration workflow
 """
 
 import asyncio
-import csv
 import logging
 import statistics
 import time
-from pathlib import Path
-from typing import List, Dict, Any, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from common import create_radio
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
-# CAD calibration results storage
-cad_results: List[Dict[str, Any]] = []
 
-
-class CadCalibrationAnalyzer:
-    """Analyzes CAD calibration results and provides recommendations."""
-    
-    def __init__(self, results: List[Dict[str, Any]]):
-        """Initialize analyzer with calibration results."""
-        self.results = results
-        self.analysis = self._analyze_results()
-    
-    def _analyze_results(self) -> Dict[str, Any]:
-        """Analyze CAD calibration results and provide recommendations."""
-        if not self.results:
-            return {"error": "No results to analyze"}
-        
-        # Group results by detection rate
-        no_detection = [r for r in self.results if r['detection_rate'] == 0]
-        low_detection = [r for r in self.results if 0 < r['detection_rate'] <= 25]
-        medium_detection = [r for r in self.results if 25 < r['detection_rate'] <= 75]
-        high_detection = [r for r in self.results if r['detection_rate'] > 75]
-        
-        # Find optimal thresholds (low false positive rate but still sensitive)
-        optimal_configs = [r for r in self.results if 0 < r['detection_rate'] <= 10]  # 0-10% detection rate
-        if not optimal_configs:
-            optimal_configs = no_detection  # Fall back to no detection if no low-detection configs
-        
-        # Sort by sensitivity (lower thresholds = more sensitive)
-        optimal_configs.sort(key=lambda x: (x['det_peak'], x['det_min']))
-        
-        analysis = {
-            'total_configurations': len(self.results),
-            'no_detection_count': len(no_detection),
-            'low_detection_count': len(low_detection),
-            'medium_detection_count': len(medium_detection),
-            'high_detection_count': len(high_detection),
-            'detection_rates': [r['detection_rate'] for r in self.results],
-            'recommended_config': optimal_configs[0] if optimal_configs else None,
-            'most_sensitive': min(self.results, key=lambda x: (x['det_peak'], x['det_min'])),
-            'least_sensitive': max(self.results, key=lambda x: (x['det_peak'], x['det_min'])),
-        }
-        
-        return analysis
-    
-    def print_summary(self, radio_config: Dict[str, Any]) -> None:
-        """Print a comprehensive calibration summary."""
-        logger.info("=" * 60)
-        logger.info("CAD CALIBRATION SUMMARY")
-        logger.info("=" * 60)
-        
-        # Radio configuration
-        logger.info("Radio Configuration:")
-        logger.info(f"  Frequency: {radio_config.get('frequency', 0)/1000000:.3f} MHz")
-        logger.info(f"  Bandwidth: {radio_config.get('bandwidth', 0)/1000:.1f} kHz")
-        logger.info(f"  Spreading Factor: {radio_config.get('spreading_factor', 0)}")
-        logger.info(f"  TX Power: {radio_config.get('tx_power', 0)} dBm")
-        
-        # Results overview
-        logger.info("Calibration Results:")
-        logger.info(f"  Total configurations tested: {self.analysis['total_configurations']}")
-        logger.info(f"  No detection (0%%): {self.analysis['no_detection_count']} configs")
-        logger.info(f"  Low detection (1-25%%): {self.analysis['low_detection_count']} configs")
-        logger.info(f"  Medium detection (26-75%%): {self.analysis['medium_detection_count']} configs")
-        logger.info(f"  High detection (>75%%): {self.analysis['high_detection_count']} configs")
-        
-        if self.analysis['detection_rates']:
-            avg_detection = statistics.mean(self.analysis['detection_rates'])
-            logger.info(f"  Average detection rate: {avg_detection:.1f}%%")
-        
-        # Recommendations
-        logger.info("Recommendations:")
-        if self.analysis['recommended_config']:
-            rec = self.analysis['recommended_config']
-            logger.info(f"  RECOMMENDED: det_peak={rec['det_peak']}, det_min={rec['det_min']}")
-            logger.info(f"    Detection rate: {rec['detection_rate']:.1f}%% (good balance)")
-        else:
-            logger.warning("  No optimal configuration found in tested range")
-        
-        # Sensitivity range
-        most_sens = self.analysis['most_sensitive']
-        least_sens = self.analysis['least_sensitive']
-        logger.info(f"  Most sensitive: det_peak={most_sens['det_peak']}, det_min={most_sens['det_min']} ({most_sens['detection_rate']:.1f}%%)")
-        logger.info(f"  Least sensitive: det_peak={least_sens['det_peak']}, det_min={least_sens['det_min']} ({least_sens['detection_rate']:.1f}%%)")
-        
-        logger.info("Note: Lower detection rates indicate better noise rejection.")
-        logger.info("Choose thresholds based on your environment and requirements.")
-    
-    def export_csv(self, filename: str) -> None:
-        """Export calibration results to CSV file."""
-        try:
-            with open(filename, 'w', newline='') as csvfile:
-                fieldnames = [
-                    'det_peak', 'det_min', 'samples', 'detections', 
-                    'detection_rate', 'timestamp'
-                ]
-                writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
-                writer.writeheader()
-                
-                for result in self.results:
-                    row = {k: result.get(k, '') for k in fieldnames}
-                    writer.writerow(row)
-            
-            logger.info(f"Results exported to {filename}")
-        except Exception as e:
-            logger.error(f"Failed to export CSV: {e}")
-
-
-def get_sf_based_thresholds(spreading_factor: int) -> Tuple[range, range]:
-    """Get CAD threshold ranges based on spreading factor."""
-    # SF-based threshold ranges (based on Semtech recommendations)
-    sf_thresholds = {
-        7: (range(18, 27, 2), range(8, 13, 1)),   # det_peak: 18-26, det_min: 8-12
-        8: (range(18, 27, 2), range(8, 13, 1)),   # det_peak: 18-26, det_min: 8-12
-        9: (range(20, 29, 2), range(9, 14, 1)),   # det_peak: 20-28, det_min: 9-13
-        10: (range(22, 31, 2), range(9, 14, 1)),  # det_peak: 22-30, det_min: 9-13
-        11: (range(24, 33, 2), range(10, 15, 1)), # det_peak: 24-32, det_min: 10-14
-        12: (range(26, 35, 2), range(10, 15, 1)), # det_peak: 26-34, det_min: 10-14
+def get_test_ranges(spreading_factor: int) -> Tuple[range, range]:
+    """Get CAD test ranges based on spreading factor"""
+    sf_ranges = {
+        7: (range(16, 29, 1), range(6, 15, 1)),
+        8: (range(16, 29, 1), range(6, 15, 1)),
+        9: (range(18, 31, 1), range(7, 16, 1)),
+        10: (range(20, 33, 1), range(8, 16, 1)),
+        11: (range(22, 35, 1), range(9, 17, 1)),
+        12: (range(24, 37, 1), range(10, 18, 1)),
     }
-    
-    # Default to SF7 ranges if unknown SF
-    return sf_thresholds.get(spreading_factor, sf_thresholds[7])
+    return sf_ranges.get(spreading_factor, sf_ranges[8])
 
 
+def get_status_text(detection_rate: float) -> str:
+    """Get status text based on detection rate"""
+    if detection_rate == 0:
+        return "QUIET"
+    elif detection_rate < 10:
+        return "LOW"
+    elif detection_rate < 30:
+        return "MED"
+    else:
+        return "HIGH"
 
 
+async def test_cad_config(radio, det_peak: int, det_min: int, samples: int = 8) -> Dict[str, Any]:
+    """Test a single CAD configuration with multiple samples"""
+    detections = 0
+    for _ in range(samples):
+        try:
+            result = await radio.perform_cad(det_peak=det_peak, det_min=det_min, timeout=0.6)
+            if result:
+                detections += 1
+        except Exception:
+            pass
+        await asyncio.sleep(0.03)
 
-async def perform_cad_sweep(
-    radio, 
-    det_peak_range: range, 
-    det_min_range: range, 
-    samples_per_config: int = 3
-) -> List[Dict[str, Any]]:
-    """Perform a CAD sweep across threshold ranges."""
+    return {
+        "det_peak": det_peak,
+        "det_min": det_min,
+        "samples": samples,
+        "detections": detections,
+        "detection_rate": (detections / samples) * 100,
+    }
+
+
+async def stage1_broad_scan(radio, peak_range: range, min_range: range) -> List[Dict[str, Any]]:
+    """Stage 1: Broad scan - 8 samples, stop after 10 consecutive quiet configs"""
+    logger.info("Stage 1: Broad scan (8 samples each)")
     results = []
-    total_configs = len(det_peak_range) * len(det_min_range)
-    current_config = 0
-    
-    logger.info(f"Starting CAD sweep: {len(det_peak_range)} peak × {len(det_min_range)} min = {total_configs} configurations")
-    logger.info(f"Taking {samples_per_config} samples per configuration...")
-    logger.info("-" * 60)
-    
-    for det_peak in det_peak_range:
-        for det_min in det_min_range:
-            current_config += 1
-            
-            # Take multiple samples for this configuration
-            sample_results = []
-            detected_count = 0
-            
-            for sample in range(samples_per_config):
-                try:
-                    # Perform CAD with calibration data
-                    result = await radio.perform_cad(
-                        det_peak=det_peak,
-                        det_min=det_min,
-                        timeout=2.0,
-                        calibration=True
-                    )
-                    
-                    sample_results.append(result)
-                    if result.get('detected', False):
-                        detected_count += 1
-                        
-                    # Small delay between samples
-                    await asyncio.sleep(0.1)
-                    
-                except Exception as e:
-                    logger.warning(f"Error in config {current_config}, sample {sample + 1}: {e}")
-                    continue
-            
-            # Calculate statistics for this configuration
-            detection_rate = (detected_count / samples_per_config) * 100 if samples_per_config > 0 else 0
-            
-            config_result = {
-                'det_peak': det_peak,
-                'det_min': det_min,
-                'samples': samples_per_config,
-                'detections': detected_count,
-                'detection_rate': detection_rate,
-                'sample_results': sample_results,
-                'timestamp': time.time()
-            }
-            
-            results.append(config_result)
-            logger.info(f"[{current_config:2d}/{total_configs}] det_peak={det_peak:2d}, det_min={det_min:2d} → {detected_count}/{samples_per_config} detected ({detection_rate:4.1f}%%)")
-    
+    consecutive_quiet = 0
+    total = len(peak_range) * len(min_range)
+    current = 0
+
+    for det_peak in peak_range:
+        for det_min in min_range:
+            current += 1
+            result = await test_cad_config(radio, det_peak, det_min, 8)
+            results.append(result)
+
+            rate = result["detection_rate"]
+            status = get_status_text(rate)
+            logger.info(
+                f"[{current:3d}/{total}] peak={det_peak:2d} min={det_min:2d} -> {result['detections']:2d}/8 ({rate:5.1f}%) {status}"
+            )
+
+            # Track consecutive quiet configs
+            if rate == 0:
+                consecutive_quiet += 1
+                if consecutive_quiet >= 10:
+                    logger.info(f"Found 10 consecutive quiet configs, stopping broad scan early")
+                    break
+            else:
+                consecutive_quiet = 0
+
+        if consecutive_quiet >= 10:
+            break
+
     return results
 
 
-async def calibrate_cad(
-    radio_type: str = "waveshare", 
-    export_csv: Optional[str] = None
-) -> Optional[Tuple[List[Dict[str, Any]], Dict[str, Any]]]:
-    """Main CAD calibration function."""
-    # Validate radio type
+async def stage2_focused_scan(radio, candidates: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Stage 2: Focused scan - 16 samples on configs with 0-20% detection"""
+    good_candidates = [c for c in candidates if c["detection_rate"] <= 20]
+    if len(good_candidates) > 20:
+        good_candidates = sorted(
+            good_candidates, key=lambda x: (x["detection_rate"], x["det_peak"])
+        )[:20]
+
+    logger.info(f"Stage 2: Focused scan on {len(good_candidates)} candidates (16 samples each)")
+    results = []
+
+    for i, candidate in enumerate(good_candidates, 1):
+        result = await test_cad_config(radio, candidate["det_peak"], candidate["det_min"], 16)
+        results.append(result)
+
+        rate = result["detection_rate"]
+        status = get_status_text(rate)
+        logger.info(
+            f"[{i:2d}/{len(good_candidates)}] peak={result['det_peak']:2d} min={result['det_min']:2d} -> {result['detections']:2d}/16 ({rate:5.1f}%) {status}"
+        )
+
+        # Stop if we have 5 excellent configs
+        excellent = [r for r in results if r["detection_rate"] <= 5]
+        if len(excellent) >= 5:
+            logger.info(f"Found 5 excellent configs (<=5% detection), moving to next stage")
+            break
+
+    return results
+
+
+async def stage3_fine_tuning(radio, candidates: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Stage 3: Fine tuning - 32 samples on top 5 quietest configs"""
+    top5 = sorted(candidates, key=lambda x: (x["detection_rate"], x["det_peak"]))[:5]
+
+    logger.info(f"Stage 3: Fine tuning on top {len(top5)} configs (32 samples each)")
+    results = []
+
+    for i, candidate in enumerate(top5, 1):
+        result = await test_cad_config(radio, candidate["det_peak"], candidate["det_min"], 32)
+        results.append(result)
+
+        rate = result["detection_rate"]
+        status = get_status_text(rate)
+        logger.info(
+            f"[{i}/{len(top5)}] peak={result['det_peak']:2d} min={result['det_min']:2d} -> {result['detections']:2d}/32 ({rate:5.1f}%) {status}"
+        )
+
+    return results
+
+
+async def stage4_validation(radio, candidates: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Stage 4: Validation - 64 samples on best 1-2 configs, 3 consecutive runs"""
+    best_configs = sorted(candidates, key=lambda x: (x["detection_rate"], x["det_peak"]))[:2]
+
+    logger.info(f"Stage 4: Validation on best {len(best_configs)} config(s) (64 samples x 3 runs)")
+    final_results = []
+
+    for i, candidate in enumerate(best_configs, 1):
+        logger.info(
+            f"Validating config {i}: peak={candidate['det_peak']}, min={candidate['det_min']}"
+        )
+
+        runs = []
+        stable = True
+
+        for run in range(3):
+            result = await test_cad_config(radio, candidate["det_peak"], candidate["det_min"], 64)
+            runs.append(result)
+
+            rate = result["detection_rate"]
+            logger.info(f"  Run {run+1}/3: {result['detections']:2d}/64 ({rate:4.1f}%)")
+
+            # Check stability (within ±5% of first run)
+            if run > 0:
+                diff = abs(result["detection_rate"] - runs[0]["detection_rate"])
+                if diff > 5.0:
+                    stable = False
+
+        # Average the runs
+        avg_detections = sum(r["detections"] for r in runs) / len(runs)
+        avg_rate = (avg_detections / 64) * 100
+
+        final_result = {
+            "det_peak": candidate["det_peak"],
+            "det_min": candidate["det_min"],
+            "samples": 64 * 3,
+            "detections": int(avg_detections * 3),
+            "detection_rate": avg_rate,
+            "stable": stable,
+            "runs": runs,
+        }
+
+        status = "STABLE" if stable else "UNSTABLE"
+        logger.info(f"  Average: {final_result['detections']:3d}/192 ({avg_rate:4.1f}%) {status}")
+
+        final_results.append(final_result)
+
+    return final_results
+
+
+async def perform_staged_calibration(
+    radio, peak_range: range, min_range: range
+) -> List[Dict[str, Any]]:
+    """Perform the complete 4-stage calibration process"""
+    # Stage 1: Broad scan
+    stage1_results = await stage1_broad_scan(radio, peak_range, min_range)
+
+    # Stage 2: Focused scan
+    stage2_results = await stage2_focused_scan(radio, stage1_results)
+
+    # Stage 3: Fine tuning
+    stage3_results = await stage3_fine_tuning(radio, stage2_results)
+
+    # Stage 4: Validation
+    stage4_results = await stage4_validation(radio, stage3_results)
+
+    return stage4_results
+
+
+async def calibrate_cad(radio_type: str = "waveshare", staged: bool = True):
+    """Main CAD calibration function with staged workflow"""
     if radio_type == "kiss-tnc":
-        logger.error("CAD calibration is not supported with KISS TNC radios.")
-        logger.error("CAD (Channel Activity Detection) is only available on SX1262 hardware.")
-        logger.error("Please use --radio-type with 'waveshare', 'uconsole', or 'meshadv-mini'")
+        logger.error("CAD not supported on KISS-TNC. Use SX1262 radios only.")
         return None
-    
-    logger.info(f"Starting CAD calibration for {radio_type} radio...")
-    logger.info("This will test various CAD threshold combinations to find optimal settings.")
-    
+
+    logger.info(f"CAD Calibration: {radio_type} radio")
+    if staged:
+        logger.info("Using 4-stage calibration workflow")
+
     radio = None
     try:
-        # Create radio (this will be an SX1262Radio instance)
+        # Create and verify radio
         radio = create_radio(radio_type)
-        
-        # Verify we have an SX1262 radio (CAD is only available on SX1262)
         from pymc_core.hardware.sx1262_wrapper import SX1262Radio
+
         if not isinstance(radio, SX1262Radio):
-            logger.error(f"Expected SX1262Radio, got {type(radio).__name__}")
-            logger.error("CAD calibration requires SX1262 hardware.")
+            logger.error(f"Need SX1262Radio, got {type(radio).__name__}")
             return None
-        
-        # Initialize radio
-        logger.info("Initializing radio...")
+
+        # Initialize
         radio.begin()
-        logger.info("Radio initialized successfully!")
-        
-        # Get radio configuration for reporting
-        radio_config = radio.get_status()
-        sf = radio_config.get('spreading_factor', 11)
-        logger.info(f"Radio config: {radio_config['frequency']/1000000:.3f}MHz, SF{sf}, {radio_config['bandwidth']/1000:.1f}kHz")
-        
-        # Wait for radio to settle
-        logger.info("Waiting for radio to settle...")
-        await asyncio.sleep(2.0)
-        
-        # Get SF-based threshold ranges
-        det_peak_range, det_min_range = get_sf_based_thresholds(sf)
-        samples_per_config = 3  # Number of samples per threshold combination
-        
-        logger.info(f"SF{sf}-optimized threshold ranges:")
-        logger.info(f"  det_peak: {list(det_peak_range)}")
-        logger.info(f"  det_min: {list(det_min_range)}")
-        logger.info(f"  samples per config: {samples_per_config}")
-        
-        # Perform calibration sweep
-        results = await perform_cad_sweep(
-            radio, 
-            det_peak_range, 
-            det_min_range, 
-            samples_per_config
+        config = radio.get_status()
+        sf = config.get("spreading_factor", 8)
+        logger.info(
+            f"Radio: {config['frequency']/1e6:.1f}MHz, SF{sf}, {config['bandwidth']/1000:.1f}kHz"
         )
-        
-        # Analyze results
-        analyzer = CadCalibrationAnalyzer(results)
-        
-        # Print summary
-        analyzer.print_summary(radio_config)
-        
-        # Export CSV if requested
-        if export_csv:
-            analyzer.export_csv(export_csv)
-        
-        # Store results globally for potential further analysis
-        global cad_results
-        cad_results = results
-        
-        return results, analyzer.analysis
-        
+
+        await asyncio.sleep(1.0)  # Radio settle time
+
+        # Get test ranges
+        peak_range, min_range = get_test_ranges(sf)
+        logger.info(
+            f"Testing peak {peak_range.start}-{peak_range.stop-1}, min {min_range.start}-{min_range.stop-1}"
+        )
+
+        # Perform calibration
+        if staged:
+            results = await perform_staged_calibration(radio, peak_range, min_range)
+
+            logger.info("=" * 60)
+            logger.info("FINAL CALIBRATION RESULTS")
+            logger.info("=" * 60)
+
+            for i, result in enumerate(results, 1):
+                stable_text = "STABLE" if result.get("stable", False) else "UNSTABLE"
+                logger.info(
+                    f"Config {i}: peak={result['det_peak']:2d}, min={result['det_min']:2d} -> "
+                    f"{result['detections']:3d}/192 ({result['detection_rate']:4.1f}%) {stable_text}"
+                )
+
+            if results:
+                best = min(results, key=lambda x: (x["detection_rate"], x["det_peak"]))
+                logger.info(
+                    f"\nRECOMMENDED: peak={best['det_peak']}, min={best['det_min']} "
+                    f"({best['detection_rate']:.1f}% detection)"
+                )
+        else:
+            # Simple sweep fallback
+            results = []
+            total = len(peak_range) * len(min_range)
+            current = 0
+            for det_peak in peak_range:
+                for det_min in min_range:
+                    current += 1
+                    result = await test_cad_config(radio, det_peak, det_min, 8)
+                    results.append(result)
+
+                    rate = result["detection_rate"]
+                    status = get_status_text(rate)
+                    logger.info(
+                        f"[{current:3d}/{total}] peak={det_peak:2d} min={det_min:2d} -> {result['detections']:2d}/8 ({rate:5.1f}%) {status}"
+                    )
+
+        return results
+
     except Exception as e:
         logger.error(f"Calibration failed: {e}")
-        import traceback
-        traceback.print_exc()
         return None
     finally:
-        # Clean up radio
-        if radio is not None:
-            try:
-                if hasattr(radio, 'cleanup'):
-                    radio.cleanup()  # type: ignore
-                    logger.info("Radio cleanup completed")
-            except Exception as e:
-                logger.warning(f"Error during radio cleanup: {e}")
+        if radio:
+            radio.cleanup()
+            logger.info("Cleanup complete")
 
 
 def main():
-    """Main function for running the CAD calibration."""
     import argparse
-    
-    parser = argparse.ArgumentParser(description="Calibrate CAD thresholds for SX1262 radio")
-    parser.add_argument(
-        "--radio-type",
-        choices=["waveshare", "uconsole", "meshadv-mini"],  # Note: kiss-tnc excluded
-        default="waveshare",
-        help="SX1262 radio hardware type (default: waveshare)"
-    )
-    parser.add_argument(
-        "--export-csv",
-        type=str,
-        help="Export results to CSV file (e.g., cad_results.csv)"
-    )
 
+    parser = argparse.ArgumentParser(description="CAD Calibration Tool with Staged Workflow")
     parser.add_argument(
-        "--verbose", "-v",
-        action="store_true",
-        help="Enable verbose logging"
+        "--radio",
+        choices=["waveshare", "uconsole", "meshadv-mini"],
+        default="waveshare",
+        help="Radio type",
     )
-    
+    parser.add_argument(
+        "--simple", action="store_true", help="Use simple sweep instead of staged workflow"
+    )
     args = parser.parse_args()
-    
-    # Set logging level
-    if args.verbose:
-        logging.getLogger().setLevel(logging.DEBUG)
-        logger.debug("Verbose logging enabled")
-    
+
     logger.info("CAD Calibration Tool")
-    logger.info("===================")
-    logger.info(f"Using {args.radio_type} radio configuration")
-    
-    # Validate export path
-    if args.export_csv:
-        export_path = Path(args.export_csv)
-        if export_path.exists():
-            logger.warning(f"CSV file {args.export_csv} already exists and will be overwritten")
-        logger.info(f"Results will be exported to: {args.export_csv}")
-    
-    logger.info("")
-    logger.info("CAD Calibration Notes:")
-    logger.info("- 0% detection = quiet RF environment (good for mesh networking)")
-    logger.info("- Higher detection rates may indicate RF noise or interference")
-    logger.info("- Recommended thresholds balance sensitivity vs false positives")
-    logger.info("")
-    
+    if not args.simple:
+        logger.info("4-Stage Workflow: Broad->Focused->Fine->Validation")
+    logger.info("Lower detection % = better for mesh networking")
+
     try:
-        result = asyncio.run(calibrate_cad(
-            radio_type=args.radio_type,
-            export_csv=args.export_csv
-        ))
-        
+        result = asyncio.run(calibrate_cad(args.radio, staged=not args.simple))
         if result:
-            logger.info("Calibration completed successfully!")
-            logger.info("Use the recommended thresholds in your CAD operations.")
+            logger.info("Calibration complete!")
         else:
-            logger.error("Calibration failed!")
             exit(1)
-            
     except KeyboardInterrupt:
-        logger.warning("Calibration interrupted by user")
-        exit(130)
+        logger.info("Stopped by user")
     except Exception as e:
-        logger.error(f"Unexpected error: {e}")
+        logger.error(f"Error: {e}")
         exit(1)
 
 

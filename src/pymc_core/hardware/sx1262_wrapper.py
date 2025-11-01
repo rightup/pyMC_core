@@ -1,6 +1,11 @@
 """
 SX1262 LoRa Radio Driver for Raspberry Pi
 Implements the LoRaRadio interface using the SX126x library
+
+
+I have made some expermental changes to the cad section that I need to revist.
+
+
 """
 
 import asyncio
@@ -194,6 +199,10 @@ class SX1262Radio(LoRaRadio):
         self._rx_done_event = asyncio.Event()
         self._cad_event = asyncio.Event()
 
+        # Custom CAD thresholds (None means use defaults)
+        self._custom_cad_peak = None
+        self._custom_cad_min = None
+
         logger.info(
             f"SX1262Radio configured: freq={frequency/1e6:.1f}MHz, "
             f"power={tx_power}dBm, sf={spreading_factor}, "
@@ -273,11 +282,14 @@ class SX1262Radio(LoRaRadio):
                 self._tx_done_event.set()
 
             # Check for CAD interrupts
-            cad_detected_flag = getattr(self.lora, 'IRQ_CAD_DETECTED', 0x4000)
-            cad_done_flag = getattr(self.lora, 'IRQ_CAD_DONE', 0x8000)
-            if irqStat & (cad_detected_flag | cad_done_flag):
-                logger.debug(f"[CAD] CAD interrupt detected (0x{irqStat:04X})")
-                if hasattr(self, '_cad_event'):
+            if irqStat & (self.lora.IRQ_CAD_DETECTED | self.lora.IRQ_CAD_DONE):
+                cad_detected = bool(irqStat & self.lora.IRQ_CAD_DETECTED)
+                cad_done = bool(irqStat & self.lora.IRQ_CAD_DONE)
+                logger.debug(
+                    f"[CAD] interrupt detected: {cad_detected}, done: {cad_done} (0x{irqStat:04X})"
+                )
+                if hasattr(self, "_cad_event"):
+                    # WAKEUP CODE
                     self._cad_event.set()
 
             # Check each RX interrupt type separately for better debugging
@@ -606,6 +618,24 @@ class SX1262Radio(LoRaRadio):
                 self.lora.setDioIrqParams(rx_mask, rx_mask, self.lora.IRQ_NONE, self.lora.IRQ_NONE)
                 self.lora.clearIrqStatus(0xFFFF)
 
+            # Program custom CAD thresholds to chip hardware if available
+            if self._custom_cad_peak is not None and self._custom_cad_min is not None:
+                logger.info(
+                    f"Settting CAD thresholds to chip: peak={self._custom_cad_peak},",
+                    f"min={self._custom_cad_min}",
+                )
+                try:
+                    self.lora.setCadParams(
+                        self.lora.CAD_ON_2_SYMB,  # 2 symbols for detection
+                        self._custom_cad_peak,
+                        self._custom_cad_min,
+                        self.lora.CAD_EXIT_STDBY,  # exit to standby
+                        0,  # no timeout
+                    )
+                    logger.debug("Custom CAD thresholds written")
+                except Exception as e:
+                    logger.warning(f"Failed to write CAD thresholds: {e}")
+
             # Set to RX continuous mode for initial operation
             self.lora.setRx(self.lora.RX_CONTINUOUS)
             self._initialized = True
@@ -709,6 +739,36 @@ class SX1262Radio(LoRaRadio):
             while self.lora.busyCheck() and busy_wait < 20:
                 await asyncio.sleep(0.01)
                 busy_wait += 1
+
+        # Listen Before Talk (LBT) - Check for channel activity using CAD
+        lbt_attempts = 0
+        max_lbt_attempts = 5
+        while lbt_attempts < max_lbt_attempts:
+            try:
+                # Perform CAD with your custom thresholds
+                channel_busy = await self.perform_cad(timeout=0.5)
+                if not channel_busy:
+                    logger.debug(f"Channel clear after {lbt_attempts + 1} CAD checks")
+                    break
+                else:
+                    lbt_attempts += 1
+                    if lbt_attempts < max_lbt_attempts:
+                        # Channel busy, wait random backoff before trying again
+                        # this may confilict with dispatcher will need testing.
+                        backoff_ms = 50 + (lbt_attempts * 20)  # 50ms, 70ms, 90ms, etc.
+                        logger.debug(
+                            f"Channel busy (CAD detected activity), backing off {backoff_ms}ms",
+                            f">>>>>>> attempt {lbt_attempts} <<<<<<<",
+                        )
+                        await asyncio.sleep(backoff_ms / 1000.0)
+                    else:
+                        logger.warning(
+                            f"Channel still busy after {max_lbt_attempts} CAD attempts",
+                            "transmitting anyway",
+                        )
+            except Exception as e:
+                logger.debug(f"CAD check failed: {e}, proceeding with transmission")
+                break
 
         # Set TXEN/RXEN pins for TX mode
         self._control_tx_rx_pins(tx_mode=True)
@@ -890,20 +950,17 @@ class SX1262Radio(LoRaRadio):
                 # Prepare packet for transmission
                 self._prepare_packet_transmission(data_list, length)
 
-                # Setup TX interrupts
-                self._setup_tx_interrupts()
-
-                # Small delay to ensure IRQ configuration is applied
-                await asyncio.sleep(self.RADIO_TIMING_DELAY)
-
                 logger.debug(
                     f"Setting TX timeout: {final_timeout_ms}ms "
                     f"(tOut={driver_timeout}) for {length} bytes"
                 )
 
-                # Prepare radio hardware for transmission
                 if not await self._prepare_radio_for_tx():
                     return
+
+                # Setup TX interrupts AFTER CAD checks (CAD changes interrupt config)
+                self._setup_tx_interrupts()
+                await asyncio.sleep(self.RADIO_TIMING_DELAY)
 
                 # Execute the transmission
                 if not await self._execute_transmission(driver_timeout):
@@ -953,11 +1010,11 @@ class SX1262Radio(LoRaRadio):
         """
         if not self._initialized or self.lora is None:
             return None
-        
+
         # Skip noise floor reading if we're currently transmitting
-        if hasattr(self, '_tx_lock') and self._tx_lock.locked():
+        if hasattr(self, "_tx_lock") and self._tx_lock.locked():
             return None
-            
+
         try:
             raw_rssi = self.lora.getRssiInst()
             if raw_rssi is not None:
@@ -967,7 +1024,9 @@ class SX1262Radio(LoRaRadio):
                     return noise_floor_dbm
                 else:
                     # Invalid reading detected - trigger radio state reset
-                    logger.debug(f"Invalid noise floor reading: {noise_floor_dbm:.1f}dBm - resetting radio")
+                    logger.debug(
+                        f"Invalid noise floor reading: {noise_floor_dbm:.1f}dBm - resetting radio"
+                    )
                     self._reset_radio_state()
                     return None
             return None
@@ -979,22 +1038,22 @@ class SX1262Radio(LoRaRadio):
         """Reset radio state to recover from invalid RSSI readings"""
         if not self._initialized or self.lora is None:
             return
-            
+
         try:
             # Force radio back to standby then RX mode
             self.lora.setStandby(self.lora.STANDBY_RC)
             time.sleep(0.05)  # Let radio settle
-            
+
             # Clear interrupt flags
             irq_status = self.lora.getIrqStatus()
             if irq_status != 0:
                 self.lora.clearIrqStatus(irq_status)
-            
+
             # Restore RX mode
             rx_mask = self._get_rx_irq_mask()
             self.lora.setDioIrqParams(rx_mask, rx_mask, self.lora.IRQ_NONE, self.lora.IRQ_NONE)
             self.lora.setRx(self.lora.RX_CONTINUOUS)
-            
+
             logger.debug("Radio state reset completed")
         except Exception as e:
             logger.warning(f"Failed to reset radio state: {e}")
@@ -1063,14 +1122,34 @@ class SX1262Radio(LoRaRadio):
                 status["hardware_ready"] = False
 
         return status
-    
 
+    def set_custom_cad_thresholds(self, peak: int, min_val: int) -> None:
+        """Set custom CAD thresholds that override the defaults.
 
+        Args:
+            peak: CAD detection peak threshold (0-31)
+            min_val: CAD detection minimum threshold (0-31)
+        """
+        if not (0 <= peak <= 31) or not (0 <= min_val <= 31):
+            raise ValueError("CAD thresholds must be between 0 and 31")
+
+        self._custom_cad_peak = peak
+        self._custom_cad_min = min_val
+        logger.info(f"Custom CAD thresholds set: peak={peak}, min={min_val}")
+
+    def clear_custom_cad_thresholds(self) -> None:
+        """Clear custom CAD thresholds and revert to defaults."""
+        self._custom_cad_peak = None
+        self._custom_cad_min = None
+        logger.info("Custom CAD thresholds cleared, reverting to defaults")
 
     def _get_thresholds_for_current_settings(self) -> tuple[int, int]:
         """Fetch CAD thresholds for the current spreading factor.
         Returns (cadDetPeak, cadDetMin).
         """
+        # Use custom thresholds if set
+        if self._custom_cad_peak is not None and self._custom_cad_min is not None:
+            return (self._custom_cad_peak, self._custom_cad_min)
 
         # Default CAD thresholds by SF (based on Semtech TR013 recommendations)
         DEFAULT_CAD_THRESHOLDS = {
@@ -1085,9 +1164,6 @@ class SX1262Radio(LoRaRadio):
         # Fall back to SF7 values if unknown
         return DEFAULT_CAD_THRESHOLDS.get(self.spreading_factor, (22, 10))
 
-
-
-
     async def perform_cad(
         self,
         det_peak: int | None = None,
@@ -1097,47 +1173,65 @@ class SX1262Radio(LoRaRadio):
     ) -> bool | dict:
         """
         Perform Channel Activity Detection (CAD).
-        If calibration=True, uses provided thresholds and returns detailed info.
+        If calibration=True, uses provided thresholds and returns info.
         If calibration=False, uses pre-calibrated/default thresholds.
-        
+
         Returns:
             bool: Channel activity detected (when calibration=False)
             dict: Calibration data (when calibration=True)
         """
         if not self._initialized:
             raise RuntimeError("Radio not initialized")
-        
+
         if not self.lora:
             raise RuntimeError("LoRa radio object not available")
 
         # Choose thresholds
         if det_peak is None or det_min is None:
             det_peak, det_min = self._get_thresholds_for_current_settings()
-        
+
         try:
+            # Put radio in standby mode before CAD configuration
+            self.lora.setStandby(self.lora.STANDBY_RC)
+
             # Clear any existing interrupt flags
             existing_irq = self.lora.getIrqStatus()
             if existing_irq != 0:
                 self.lora.clearIrqStatus(existing_irq)
-            
+
+            # Configure CAD interrupts
+            cad_mask = self.lora.IRQ_CAD_DONE | self.lora.IRQ_CAD_DETECTED
+            self.lora.setDioIrqParams(cad_mask, cad_mask, self.lora.IRQ_NONE, self.lora.IRQ_NONE)
+
+            self.lora.setCadParams(
+                self.lora.CAD_ON_2_SYMB,  # 2 symbols
+                det_peak,
+                det_min,
+                self.lora.CAD_EXIT_STDBY,  # exit to standby
+                0,  # no timeout
+            )
+
             # Clear CAD event before starting
             self._cad_event.clear()
-            
-            # Start CAD operation using the driver's start_cad method
-            self.lora.start_cad(det_peak, det_min)
+
+            # Start CAD operation
+            self.lora.setCad()
+
+            logger.debug(f"CAD started with peak={det_peak}, min={det_min}")
 
             # Wait for CAD completion
             try:
                 await asyncio.wait_for(self._cad_event.wait(), timeout=timeout)
                 self._cad_event.clear()
-                
-                # Read interrupt status
-                irq = self.lora.getIrqStatus()
-                self.lora.clearIrqStatus(irq)
 
-                # Check for CAD detection
-                cad_detected_flag = getattr(self.lora, 'IRQ_CAD_DETECTED', 0x4000)
-                detected = bool(irq & cad_detected_flag)
+                irq = self.lora.getIrqStatus()
+                logger.debug(f"CAD completed with IRQ status: 0x{irq:04X}")
+                self.lora.clearIrqStatus(irq)
+                detected = bool(irq & self.lora.IRQ_CAD_DETECTED)
+                cad_done = bool(irq & self.lora.IRQ_CAD_DONE)
+
+                if not cad_done:
+                    logger.warning("CAD interrupt received but CAD_DONE flag not set")
 
                 if calibration:
                     return {
@@ -1146,14 +1240,21 @@ class SX1262Radio(LoRaRadio):
                         "det_peak": det_peak,
                         "det_min": det_min,
                         "detected": detected,
+                        "cad_done": cad_done,
                         "timestamp": time.time(),
-                        "irq_status": irq
+                        "irq_status": irq,
                     }
                 else:
                     return detected
 
             except asyncio.TimeoutError:
                 logger.debug("CAD operation timed out")
+                # Check if there were any interrupt flags set anyway
+                irq = self.lora.getIrqStatus()
+                if irq != 0:
+                    logger.debug(f"CAD timeout but IRQ status: 0x{irq:04X}")
+                    self.lora.clearIrqStatus(irq)
+
                 if calibration:
                     return {
                         "sf": self.spreading_factor,
@@ -1162,11 +1263,11 @@ class SX1262Radio(LoRaRadio):
                         "det_min": det_min,
                         "detected": False,
                         "timestamp": time.time(),
-                        "timeout": True
+                        "timeout": True,
                     }
                 else:
                     return False
-                    
+
         except Exception as e:
             logger.error(f"CAD operation failed: {e}")
             if calibration:
@@ -1177,7 +1278,7 @@ class SX1262Radio(LoRaRadio):
                     "det_min": det_min,
                     "detected": False,
                     "timestamp": time.time(),
-                    "error": str(e)
+                    "error": str(e),
                 }
             else:
                 return False
@@ -1189,8 +1290,6 @@ class SX1262Radio(LoRaRadio):
                 self.lora.setRx(self.lora.RX_CONTINUOUS)
             except Exception as e:
                 logger.warning(f"Failed to restore RX mode after CAD: {e}")
-
-
 
     def cleanup(self) -> None:
         """Clean up radio resources"""

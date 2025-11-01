@@ -1484,7 +1484,6 @@ class SX126x(BaseLoRa):
 
         return tuple(feedback[nAddress + 1 :])
 
-
     def start_cad(self, det_peak: int, det_min: int):
         """Start CAD with given thresholds."""
         self.clearIrqStatus(0xFFFF)
