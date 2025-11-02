@@ -5,7 +5,6 @@ CAD Calibration Tool - Improved staged calibration workflow
 
 import asyncio
 import logging
-import time
 from typing import Any, Dict, List, Optional, Tuple
 
 from common import create_radio
