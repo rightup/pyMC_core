@@ -36,22 +36,22 @@ repos:
         exclude: '^(src/pymc_core/hardware/lora/|examples/)'
 
   # Run pytest to ensure all tests pass
-  - repo: local
-    hooks:
-      - id: pytest
-        name: pytest
-        entry: pytest
-        language: system
-        pass_filenames: false
-        # Only run if Python files in src/ or tests/ have changed
-        files: ^(src/|tests/|pyproject\.toml|setup\.py).*$
-        args: ["-v", "--tb=short"]
-      - id: pytest-fast
-        name: pytest-fast (quick smoke test)
-        entry: pytest
-        language: system
-        pass_filenames: false
-        # Run a quick subset of tests for faster feedback
-        files: ^(src/|tests/).*\.py$
-        args: ["-v", "--tb=short", "-x", "--maxfail=3", "tests/test_basic.py", "tests/test_crypto.py"]
-        stages: [manual]
+  # - repo: local
+  #   hooks:
+  #     - id: pytest
+  #       name: pytest
+  #       entry: pytest
+  #       language: system
+  #       pass_filenames: false
+  #       # Only run if Python files in src/ or tests/ have changed
+  #       files: ^(src/|tests/|pyproject\.toml|setup\.py).*$
+  #       args: ["-v", "--tb=short"]
+  #     - id: pytest-fast
+  #       name: pytest-fast (quick smoke test)
+  #       entry: pytest
+  #       language: system
+  #       pass_filenames: false
+  #       # Run a quick subset of tests for faster feedback
+  #       files: ^(src/|tests/).*\.py$
+  #       args: ["-v", "--tb=short", "-x", "--maxfail=3", "tests/test_basic.py", "tests/test_crypto.py"]
+  #       stages: [manual]

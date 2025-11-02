@@ -1483,3 +1483,17 @@ class SX126x(BaseLoRa):
             _get_output(self._cs_define).on()
 
         return tuple(feedback[nAddress + 1 :])
+
+    def start_cad(self, det_peak: int, det_min: int):
+        """Start CAD with given thresholds."""
+        self.clearIrqStatus(0xFFFF)
+        self.setCadParams(
+            self.CAD_ON_8_SYMB,
+            det_peak,
+            det_min,
+            self.CAD_EXIT_STDBY,
+            0xFFFFFF,
+        )
+        mask = self.IRQ_CAD_DONE | self.IRQ_CAD_DETECTED
+        self.setDioIrqParams(mask, mask, self.IRQ_NONE, self.IRQ_NONE)
+        self.setCad()

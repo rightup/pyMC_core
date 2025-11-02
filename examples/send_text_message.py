@@ -14,12 +14,12 @@ from pymc_core.protocol import Packet
 from pymc_core.protocol.packet_builder import PacketBuilder
 
 
-async def send_text_message(radio_type: str = "waveshare"):
+async def send_text_message(radio_type: str = "waveshare", serial_port: str = "/dev/ttyUSB0"):
     """Send a text message with CRC validation."""
     print("Starting text message send example...")
 
     # Create mesh node
-    mesh_node, identity = create_mesh_node("MessageSender", radio_type)
+    mesh_node, identity = create_mesh_node("MessageSender", radio_type, serial_port)
 
     # Initialize packet variable
     packet = Packet()
@@ -71,11 +71,31 @@ async def send_text_message(radio_type: str = "waveshare"):
     return packet, mesh_node
 
 
-def main(radio_type: str = "waveshare"):
+def main():
     """Main function for running the example."""
-    print(f"Using {radio_type} radio configuration")
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Send a text message to the mesh network")
+    parser.add_argument(
+        "--radio-type",
+        choices=["waveshare", "uconsole", "meshadv-mini", "kiss-tnc"],
+        default="waveshare",
+        help="Radio hardware type (default: waveshare)",
+    )
+    parser.add_argument(
+        "--serial-port",
+        default="/dev/ttyUSB0",
+        help="Serial port for KISS TNC (default: /dev/ttyUSB0)",
+    )
+
+    args = parser.parse_args()
+
+    print(f"Using {args.radio_type} radio configuration")
+    if args.radio_type == "kiss-tnc":
+        print(f"Serial port: {args.serial_port}")
+
     try:
-        packet, node = asyncio.run(send_text_message(radio_type))
+        packet, node = asyncio.run(send_text_message(args.radio_type, args.serial_port))
         print("Example completed")
     except KeyboardInterrupt:
         print("\nInterrupted by user")
@@ -84,7 +104,4 @@ def main(radio_type: str = "waveshare"):
 
 
 if __name__ == "__main__":
-    import sys
-
-    radio_type = sys.argv[1] if len(sys.argv) > 1 else "waveshare"
-    main(radio_type)
+    main()
