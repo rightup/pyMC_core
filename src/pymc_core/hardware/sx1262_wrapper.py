@@ -3,7 +3,7 @@ SX1262 LoRa Radio Driver for Raspberry Pi
 Implements the LoRaRadio interface using the SX126x library
 
 
-I have made some expermental changes to the cad section that I need to revist.
+I have made some experimental changes to the cad section that I need to revisit.
 
 
 """
