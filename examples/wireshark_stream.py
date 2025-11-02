@@ -30,7 +30,7 @@ class WiresharkHandler:
 
     async def __call__(self, packet, metadata=None):
         try:
-            raw_data = packet.get_raw_data()
+            raw_data = packet.write_to()
             ts = time.time()
             ts_sec, ts_usec = int(ts), int((ts % 1) * 1_000_000)
             pkt_hdr = struct.pack("<IIII", ts_sec, ts_usec, len(raw_data), len(raw_data))
