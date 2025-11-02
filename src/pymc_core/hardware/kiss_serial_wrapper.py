@@ -66,7 +66,7 @@ class KissSerialWrapper(LoRaRadio):
         Initialize KISS Serial Wrapper
 
         Args:
-            port: Serial port device path (e.g., '/dev/ttyUSB0, /dev/cu.usbserial-0001, comm1 etc')
+            port: Serial port device path (e.g., '/dev/ttyUSB0', '/dev/cu.usbserial-0001', 'comm1', etc.)
             baudrate: Serial communication baud rate (default: 115200)
             timeout: Serial read timeout in seconds (default: 1.0)
             kiss_port: KISS port number (0-15, default: 0)
