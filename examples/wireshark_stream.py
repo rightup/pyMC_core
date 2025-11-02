@@ -3,7 +3,6 @@ import argparse
 import asyncio
 import socket
 import struct
-import sys
 import time
 
 from common import create_mesh_node
