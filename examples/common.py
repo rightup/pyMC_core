@@ -12,7 +12,7 @@ import sys
 
 # Set up logging
 logging.basicConfig(
-    level=logging.WARNING, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
 
@@ -25,19 +25,47 @@ from pymc_core.hardware.base import LoRaRadio
 from pymc_core.node.node import MeshNode
 
 
-def create_radio(radio_type: str = "waveshare") -> LoRaRadio:
-    """Create an SX1262 radio instance with configuration for specified hardware.
+def create_radio(radio_type: str = "waveshare", serial_port: str = "/dev/ttyUSB0") -> LoRaRadio:
+    """Create a radio instance with configuration for specified hardware.
 
     Args:
-        radio_type: Type of radio hardware ("waveshare" or "uconsole")
+        radio_type: Type of radio hardware ("waveshare", "uconsole", "meshadv-mini", or "kiss-tnc")
+        serial_port: Serial port for KISS TNC (only used with "kiss-tnc" type)
 
     Returns:
-        SX1262Radio instance configured for the specified hardware
+        Radio instance configured for the specified hardware
     """
-    logger.info(f"Creating SX1262 radio for {radio_type}...")
+    logger.info(f"Creating radio for {radio_type}...")
 
     try:
-        # Direct SX1262 radio
+        # Check if this is a KISS TNC configuration
+        if radio_type == "kiss-tnc":
+            from pymc_core.hardware.kiss_serial_wrapper import KissSerialWrapper
+
+            logger.debug("Using KISS Serial Wrapper")
+
+            # KISS TNC configuration
+            kiss_config = {
+                "frequency": int(869.618 * 1000000),  # EU: 869.525 MHz
+                "bandwidth": int(62.5 * 1000),  # 250 kHz
+                "spreading_factor": 8,  # LoRa SF11
+                "coding_rate": 8,  # LoRa CR 4/5
+                "sync_word": 0x12,  # Sync word
+                "power": 22,  # TX power
+            }
+
+            # Create KISS wrapper with specified port
+            kiss_wrapper = KissSerialWrapper(
+                port=serial_port, baudrate=115200, radio_config=kiss_config, auto_configure=True
+            )
+
+            logger.info("Created KISS Serial Wrapper")
+            logger.info(
+                f"Frequency: {kiss_config['frequency']/1000000:.3f}MHz, TX Power: {kiss_config['power']}dBm"
+            )
+            return kiss_wrapper
+
+        # Direct SX1262 radio for other types
         from pymc_core.hardware.sx1262_wrapper import SX1262Radio
 
         logger.debug("Imported SX1262Radio successfully")
@@ -53,11 +81,11 @@ def create_radio(radio_type: str = "waveshare") -> LoRaRadio:
                 "irq_pin": 16,
                 "txen_pin": 13,  # GPIO 13 for TX enable
                 "rxen_pin": 12,
-                "frequency": int(869.525 * 1000000),  # EU: 869.525 MHz
+                "frequency": int(869.618 * 1000000),  # EU: 869.618 MHz
                 "tx_power": 22,
-                "spreading_factor": 11,
-                "bandwidth": int(250 * 1000),
-                "coding_rate": 5,
+                "spreading_factor": 8,
+                "bandwidth": int(62.5 * 1000),
+                "coding_rate": 8,
                 "preamble_length": 17,
                 "is_waveshare": True,
             },
@@ -97,7 +125,7 @@ def create_radio(radio_type: str = "waveshare") -> LoRaRadio:
 
         if radio_type not in configs:
             raise ValueError(
-                f"Unknown radio type: {radio_type}. Use 'waveshare' 'meshadv-mini' or 'uconsole'"
+                f"Unknown radio type: {radio_type}. Use 'waveshare', 'meshadv-mini', 'uconsole', or 'kiss-tnc'"
             )
 
         radio_kwargs = configs[radio_type]
@@ -119,13 +147,14 @@ def create_radio(radio_type: str = "waveshare") -> LoRaRadio:
 
 
 def create_mesh_node(
-    node_name: str = "ExampleNode", radio_type: str = "waveshare"
+    node_name: str = "ExampleNode", radio_type: str = "waveshare", serial_port: str = "/dev/ttyUSB0"
 ) -> tuple[MeshNode, LocalIdentity]:
-    """Create a mesh node with SX1262 radio.
+    """Create a mesh node with radio.
 
     Args:
         node_name: Name for the mesh node
-        radio_type: Type of radio hardware ("waveshare" or "uconsole")
+        radio_type: Type of radio hardware ("waveshare", "uconsole", "meshadv-mini", or "kiss-tnc")
+        serial_port: Serial port for KISS TNC (only used with "kiss-tnc" type)
 
     Returns:
         Tuple of (MeshNode, LocalIdentity)
@@ -138,13 +167,28 @@ def create_mesh_node(
         identity = LocalIdentity()
         logger.info(f"Created identity with public key: {identity.get_public_key().hex()[:16]}...")
 
-        # Create the SX1262 radio
+        # Create the radio
         logger.debug("Creating radio...")
-        radio = create_radio(radio_type)
+        radio = create_radio(radio_type, serial_port)
 
-        logger.debug("Calling radio.begin()...")
-        radio.begin()
-        logger.info("Radio initialized successfully")
+        # Initialize radio (different methods for different types)
+        if radio_type == "kiss-tnc":
+            logger.debug("Connecting KISS radio...")
+            if radio.connect():
+                logger.info("KISS radio connected successfully")
+                print(f"KISS radio connected to {serial_port}")
+                if hasattr(radio, "kiss_mode_active") and radio.kiss_mode_active:
+                    print("KISS mode is active")
+                else:
+                    print("Warning: KISS mode may not be active")
+            else:
+                logger.error("Failed to connect KISS radio")
+                print(f"Failed to connect to KISS radio on {serial_port}")
+                raise Exception(f"KISS radio connection failed on {serial_port}")
+        else:
+            logger.debug("Calling radio.begin()...")
+            radio.begin()
+            logger.info("Radio initialized successfully")
 
         # Create a mesh node with the radio and identity
         config = {"node": {"name": node_name}}
