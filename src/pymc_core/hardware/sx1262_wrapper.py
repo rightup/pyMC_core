@@ -621,7 +621,7 @@ class SX1262Radio(LoRaRadio):
             # Program custom CAD thresholds to chip hardware if available
             if self._custom_cad_peak is not None and self._custom_cad_min is not None:
                 logger.info(
-                    f"Settting CAD thresholds to chip: peak={self._custom_cad_peak},",
+                    f"Setting CAD thresholds to chip: peak={self._custom_cad_peak},",
                     f"min={self._custom_cad_min}",
                 )
                 try:
