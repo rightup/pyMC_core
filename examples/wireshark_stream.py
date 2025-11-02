@@ -45,17 +45,25 @@ async def main(ip, port):
     sock, dest = setup_wireshark_stream(ip, port)
     print("Sent PCAP global header")
 
-    mesh_node, identity = create_mesh_node("WiresharkStreamer")
-    print("Mesh node created")
+    # Create radio and dispatcher directly (no default handlers)
+    from common import create_radio
+
+    from pymc_core.node.dispatcher import Dispatcher
+
+    radio = create_radio("waveshare")
+    radio.begin()
+    print("Radio initialized")
+
+    dispatcher = Dispatcher(radio)
+    print("Dispatcher created (no default handlers)")
 
     wireshark_handler = WiresharkHandler(sock, dest)
-    mesh_node.dispatcher.register_fallback_handler(wireshark_handler)
+    dispatcher.register_fallback_handler(wireshark_handler)
     print("Fallback handler registered")
 
     print("Listening for packets...")
     try:
-        while True:
-            await asyncio.sleep(1)
+        await dispatcher.run_forever()
     except KeyboardInterrupt:
         print("Stopping...")
 
