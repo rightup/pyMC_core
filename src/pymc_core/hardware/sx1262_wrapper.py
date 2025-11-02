@@ -754,7 +754,7 @@ class SX1262Radio(LoRaRadio):
                     lbt_attempts += 1
                     if lbt_attempts < max_lbt_attempts:
                         # Channel busy, wait random backoff before trying again
-                        # this may confilict with dispatcher will need testing.
+                        # this may conflict with dispatcher will need testing.
                         # Channel busy, wait backoff before trying again (MeshCore-inspired)
                         import random
 
