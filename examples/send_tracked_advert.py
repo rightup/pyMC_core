@@ -31,7 +31,7 @@ def simple_repeat_counter(raw_data: bytes):
 
     try:
         # Simple check - just count any received packet as a potential repeat
-        # I have kept it simple but you would want to check if its actaully a advert etc.
+        # I have kept it simple but you would want to check if it's actually an advert etc.
         repeat_count += 1
         print(f"PACKET REPEAT HEARD #{repeat_count} ({len(raw_data)} bytes)")
     except Exception as e:
