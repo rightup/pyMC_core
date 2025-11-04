@@ -11,6 +11,7 @@ I have made some experimental changes to the cad section that I need to revisit.
 import asyncio
 import logging
 import time
+import math
 from typing import Callable, Optional
 
 from gpiozero import Button, Device, OutputDevice
@@ -671,46 +672,35 @@ class SX1262Radio(LoRaRadio):
             raise RuntimeError(f"Failed to initialize SX1262 radio: {e}") from e
 
     def _calculate_tx_timeout(self, packet_length: int) -> tuple[int, int]:
-        """Calculate transmission timeout using correct LoRa formula"""
-        import math
+        """Calculate transmission timeout using C++ MeshCore formula - simple and accurate"""
+     
+        symbol_time = float(1 << self.spreading_factor) / float(self.bandwidth)
+        preamble_time = (self.preamble_length + 4.25) * symbol_time
+        tmp = (8 * packet_length) - (4 * self.spreading_factor) + 28 + 16
+        #CRC is enabled
+        tmp -= 16
         
-        sf = self.spreading_factor
-        bw = self.bandwidth  
-        cr = self.coding_rate
-        preamble_len = self.preamble_length
+        if tmp > 0:
+            payload_symbols = 8.0 + math.ceil(float(tmp) / float(4 * self.spreading_factor)) * (self.coding_rate + 4)
+        else:
+            payload_symbols = 8.0
         
-        # LoRa symbol duration (milliseconds)
-        t_symbol = (2 ** sf) / bw * 1000
-        
-        # Preamble time  
-        t_preamble = (preamble_len + 4.25) * t_symbol
-        
-        # Payload calculation
-        payload_bits = packet_length * 8
-        header_bits = 20  # Explicit header
-        
-        # Payload symbols calculation
-        payload_symbol_count = 8 + max(0, 
-            math.ceil((payload_bits + header_bits - 4*sf + 28 + 16) / (4*sf)) * cr
-        )
-        
-        t_payload = payload_symbol_count * t_symbol
-        total_tx_time_ms = t_preamble + t_payload
-        
-        # safety margin (50%)
-        timeout_ms = int(total_tx_time_ms * 1.5)
-        
-        # Minimum 500ms, maximum 30s
-        timeout_ms = max(500, min(timeout_ms, 30000))
-        
-        # Convert to driver format
+        payload_time = payload_symbols * symbol_time
+        air_time_ms = (preamble_time + payload_time) * 1000.0
+        timeout_ms = math.ceil(air_time_ms) + 1000
         driver_timeout = timeout_ms * 64
         
         logger.debug(
-            f"TX timing SF{sf}/{bw/1000:.1f}kHz: "
-            f"symbol={t_symbol:.1f}ms, preamble={t_preamble:.0f}ms, "
-            f"payload={t_payload:.0f}ms, total={total_tx_time_ms:.0f}ms, "
-            f"timeout={timeout_ms}ms"
+            f"TX timing SF{self.spreading_factor}/{self.bandwidth/1000:.1f}kHz "
+            f"CR4/{self.coding_rate} {packet_length}B: "
+            f"symbol={symbol_time*1000:.1f}ms, "
+            f"preamble={preamble_time*1000:.0f}ms, "
+            f"tmp={tmp}, "
+            f"payload_syms={payload_symbols:.1f}, "
+            f"payload={payload_time*1000:.0f}ms, "
+            f"air_time={air_time_ms:.0f}ms, "
+            f"timeout={timeout_ms}ms, "
+            f"driver_timeout={driver_timeout}"
         )
         
         return timeout_ms, driver_timeout
