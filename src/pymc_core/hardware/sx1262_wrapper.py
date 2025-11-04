@@ -671,34 +671,49 @@ class SX1262Radio(LoRaRadio):
             raise RuntimeError(f"Failed to initialize SX1262 radio: {e}") from e
 
     def _calculate_tx_timeout(self, packet_length: int) -> tuple[int, int]:
-        """Calculate transmission timeout based on modulation parameters"""
+        """Calculate transmission timeout using correct LoRa formula"""
+        import math
+        
         sf = self.spreading_factor
-        bw = self.bandwidth
-
-        # Realistic timeout calculation based on actual LoRa performance
-        if sf == 11 and bw == 250000:
-            # Your specific configuration: SF11/250kHz
-            base_tx_time_ms = 500 + (packet_length * 8)  # ~500ms + 8ms per byte
-        elif sf == 7 and bw == 125000:
-            # Standard configuration
-            base_tx_time_ms = 100 + (packet_length * 2)  # ~100ms + 2ms per byte
-        else:
-            # General formula for other configurations
-            sf_factor = 2 ** (sf - 7)
-            bw_factor = 125000.0 / bw
-            base_tx_time_ms = int(100 * sf_factor * bw_factor + (packet_length * sf_factor))
-
-        # Add reasonable safety margin (2x) for timeout
-        safety_margin = 2.0
-        final_timeout_ms = int(base_tx_time_ms * safety_margin)
-
-        # Reasonable limits: minimum 1 second, maximum 10 seconds
-        final_timeout_ms = max(1000, min(final_timeout_ms, 10000))
-
-        # Convert to driver timeout format
-        driver_timeout = final_timeout_ms * 64  # tOut = timeout * 64
-
-        return final_timeout_ms, driver_timeout
+        bw = self.bandwidth  
+        cr = self.coding_rate
+        preamble_len = self.preamble_length
+        
+        # LoRa symbol duration (milliseconds)
+        t_symbol = (2 ** sf) / bw * 1000
+        
+        # Preamble time  
+        t_preamble = (preamble_len + 4.25) * t_symbol
+        
+        # Payload calculation
+        payload_bits = packet_length * 8
+        header_bits = 20  # Explicit header
+        
+        # Payload symbols calculation
+        payload_symbol_count = 8 + max(0, 
+            math.ceil((payload_bits + header_bits - 4*sf + 28 + 16) / (4*sf)) * cr
+        )
+        
+        t_payload = payload_symbol_count * t_symbol
+        total_tx_time_ms = t_preamble + t_payload
+        
+        # safety margin (50%)
+        timeout_ms = int(total_tx_time_ms * 1.5)
+        
+        # Minimum 500ms, maximum 30s
+        timeout_ms = max(500, min(timeout_ms, 30000))
+        
+        # Convert to driver format
+        driver_timeout = timeout_ms * 64
+        
+        logger.debug(
+            f"TX timing SF{sf}/{bw/1000:.1f}kHz: "
+            f"symbol={t_symbol:.1f}ms, preamble={t_preamble:.0f}ms, "
+            f"payload={t_payload:.0f}ms, total={total_tx_time_ms:.0f}ms, "
+            f"timeout={timeout_ms}ms"
+        )
+        
+        return timeout_ms, driver_timeout
 
     def _prepare_packet_transmission(self, data_list: list, length: int) -> None:
         """Prepare radio for packet transmission"""
