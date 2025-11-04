@@ -12,8 +12,8 @@ import asyncio
 import logging
 import time
 import math
+import random
 from typing import Callable, Optional
-
 from gpiozero import Button, Device, OutputDevice
 
 # Force gpiozero to use LGPIOFactory - no RPi.GPIO fallback
@@ -758,18 +758,17 @@ class SX1262Radio(LoRaRadio):
                 else:
                     lbt_attempts += 1
                     if lbt_attempts < max_lbt_attempts:
-                        # Channel busy, wait random backoff before trying again
-                        # this may conflict with dispatcher will need testing.
-                        # Channel busy, wait backoff before trying again (MeshCore-inspired)
-                        import random
 
-                        base_delay = random.randint(120, 240)
-                        backoff_ms = base_delay + (
-                            lbt_attempts * 50
-                        )  # Progressive: 120-290ms, 170-340ms, etc.
+                        # Jitter (50-200ms)
+                        base_delay = random.randint(50, 200)
+                        # Exponential backoff: base * 2^attempts
+                        backoff_ms = base_delay * (2 ** (lbt_attempts - 1))
+                        # Cap at 5 seconds maximum
+                        backoff_ms = min(backoff_ms, 5000)
+                        
                         logger.debug(
-                            f"Channel busy (CAD detected activity), backing off {backoff_ms}ms"
-                            f" - >>>>>>> attempt {lbt_attempts} <<<<<<<",
+                            f"Channel busy (CAD detected activity), backing off {backoff_ms}ms "
+                            f"- attempt {lbt_attempts}/{max_lbt_attempts} (exponential backoff)"
                         )
                         await asyncio.sleep(backoff_ms / 1000.0)
                     else:
