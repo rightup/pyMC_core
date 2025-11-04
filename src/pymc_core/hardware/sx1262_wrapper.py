@@ -11,8 +11,9 @@ I have made some experimental changes to the cad section that I need to revisit.
 import asyncio
 import logging
 import time
+import math
+import random
 from typing import Callable, Optional
-
 from gpiozero import Button, Device, OutputDevice
 
 # Force gpiozero to use LGPIOFactory - no RPi.GPIO fallback
@@ -671,34 +672,38 @@ class SX1262Radio(LoRaRadio):
             raise RuntimeError(f"Failed to initialize SX1262 radio: {e}") from e
 
     def _calculate_tx_timeout(self, packet_length: int) -> tuple[int, int]:
-        """Calculate transmission timeout based on modulation parameters"""
-        sf = self.spreading_factor
-        bw = self.bandwidth
-
-        # Realistic timeout calculation based on actual LoRa performance
-        if sf == 11 and bw == 250000:
-            # Your specific configuration: SF11/250kHz
-            base_tx_time_ms = 500 + (packet_length * 8)  # ~500ms + 8ms per byte
-        elif sf == 7 and bw == 125000:
-            # Standard configuration
-            base_tx_time_ms = 100 + (packet_length * 2)  # ~100ms + 2ms per byte
+        """Calculate transmission timeout using C++ MeshCore formula - simple and accurate"""
+     
+        symbol_time = float(1 << self.spreading_factor) / float(self.bandwidth)
+        preamble_time = (self.preamble_length + 4.25) * symbol_time
+        tmp = (8 * packet_length) - (4 * self.spreading_factor) + 28 + 16
+        #CRC is enabled
+        tmp -= 16
+        
+        if tmp > 0:
+            payload_symbols = 8.0 + math.ceil(float(tmp) / float(4 * self.spreading_factor)) * (self.coding_rate + 4)
         else:
-            # General formula for other configurations
-            sf_factor = 2 ** (sf - 7)
-            bw_factor = 125000.0 / bw
-            base_tx_time_ms = int(100 * sf_factor * bw_factor + (packet_length * sf_factor))
-
-        # Add reasonable safety margin (2x) for timeout
-        safety_margin = 2.0
-        final_timeout_ms = int(base_tx_time_ms * safety_margin)
-
-        # Reasonable limits: minimum 1 second, maximum 10 seconds
-        final_timeout_ms = max(1000, min(final_timeout_ms, 10000))
-
-        # Convert to driver timeout format
-        driver_timeout = final_timeout_ms * 64  # tOut = timeout * 64
-
-        return final_timeout_ms, driver_timeout
+            payload_symbols = 8.0
+        
+        payload_time = payload_symbols * symbol_time
+        air_time_ms = (preamble_time + payload_time) * 1000.0
+        timeout_ms = math.ceil(air_time_ms) + 1000
+        driver_timeout = timeout_ms * 64
+        
+        logger.debug(
+            f"TX timing SF{self.spreading_factor}/{self.bandwidth/1000:.1f}kHz "
+            f"CR4/{self.coding_rate} {packet_length}B: "
+            f"symbol={symbol_time*1000:.1f}ms, "
+            f"preamble={preamble_time*1000:.0f}ms, "
+            f"tmp={tmp}, "
+            f"payload_syms={payload_symbols:.1f}, "
+            f"payload={payload_time*1000:.0f}ms, "
+            f"air_time={air_time_ms:.0f}ms, "
+            f"timeout={timeout_ms}ms, "
+            f"driver_timeout={driver_timeout}"
+        )
+        
+        return timeout_ms, driver_timeout
 
     def _prepare_packet_transmission(self, data_list: list, length: int) -> None:
         """Prepare radio for packet transmission"""
@@ -753,18 +758,17 @@ class SX1262Radio(LoRaRadio):
                 else:
                     lbt_attempts += 1
                     if lbt_attempts < max_lbt_attempts:
-                        # Channel busy, wait random backoff before trying again
-                        # this may conflict with dispatcher will need testing.
-                        # Channel busy, wait backoff before trying again (MeshCore-inspired)
-                        import random
 
-                        base_delay = random.randint(120, 240)
-                        backoff_ms = base_delay + (
-                            lbt_attempts * 50
-                        )  # Progressive: 120-290ms, 170-340ms, etc.
+                        # Jitter (50-200ms)
+                        base_delay = random.randint(50, 200)
+                        # Exponential backoff: base * 2^attempts
+                        backoff_ms = base_delay * (2 ** (lbt_attempts - 1))
+                        # Cap at 5 seconds maximum
+                        backoff_ms = min(backoff_ms, 5000)
+                        
                         logger.debug(
-                            f"Channel busy (CAD detected activity), backing off {backoff_ms}ms"
-                            f" - >>>>>>> attempt {lbt_attempts} <<<<<<<",
+                            f"Channel busy (CAD detected activity), backing off {backoff_ms}ms "
+                            f"- attempt {lbt_attempts}/{max_lbt_attempts} (exponential backoff)"
                         )
                         await asyncio.sleep(backoff_ms / 1000.0)
                     else:
