@@ -10,10 +10,11 @@ I have made some experimental changes to the cad section that I need to revisit.
 
 import asyncio
 import logging
-import time
 import math
 import random
+import time
 from typing import Callable, Optional
+
 from gpiozero import Button, Device, OutputDevice
 
 # Force gpiozero to use LGPIOFactory - no RPi.GPIO fallback
@@ -356,11 +357,9 @@ class SX1262Radio(LoRaRadio):
                         irqStat = self.lora.getIrqStatus()
                         logger.debug(f"[RX] IRQ Status: 0x{irqStat:04X}")
 
-                        # Clear RX-related interrupt flags only
-                        rx_flags = self._get_rx_irq_mask()
-                        flags_to_clear = irqStat & rx_flags
-                        if flags_to_clear:
-                            self.lora.clearIrqStatus(flags_to_clear)
+                        # Clear ALL interrupt flags immediately to prevent duplicate processing
+                        if irqStat != 0:
+                            self.lora.clearIrqStatus(irqStat)
 
                         if irqStat & self.lora.IRQ_RX_DONE:
                             last_preamble_time = 0  # Reset preamble timer on successful RX
@@ -429,19 +428,12 @@ class SX1262Radio(LoRaRadio):
                         else:
                             pass  # Other RX interrupt
 
-                        # For preamble detection, don't put radio back to RX mode immediately
-                        # Let the packet reception complete naturally
-                        if not (irqStat & self.lora.IRQ_PREAMBLE_DETECTED):
-                            # Always ensure radio stays in RX continuous mode after
-                            # any RX interrupt (except preamble)
-                            try:
-                                self.lora.setRx(self.lora.RX_CONTINUOUS)
-                            except Exception:
-                                pass
-                        else:
-                            # Skipping RX mode reset during preamble detection -
-                            # letting packet complete
-                            pass
+                        # Always restore RX continuous mode after processing any interrupt
+                        # This ensures the radio stays ready for the next packet
+                        try:
+                            self.lora.setRx(self.lora.RX_CONTINUOUS)
+                        except Exception as e:
+                            logger.debug(f"Failed to restore RX mode: {e}")
                     except Exception as e:
                         logger.error(f"[IRQ RX] Error processing received packet: {e}")
 
@@ -673,23 +665,25 @@ class SX1262Radio(LoRaRadio):
 
     def _calculate_tx_timeout(self, packet_length: int) -> tuple[int, int]:
         """Calculate transmission timeout using C++ MeshCore formula - simple and accurate"""
-     
+
         symbol_time = float(1 << self.spreading_factor) / float(self.bandwidth)
         preamble_time = (self.preamble_length + 4.25) * symbol_time
         tmp = (8 * packet_length) - (4 * self.spreading_factor) + 28 + 16
-        #CRC is enabled
+        # CRC is enabled
         tmp -= 16
-        
+
         if tmp > 0:
-            payload_symbols = 8.0 + math.ceil(float(tmp) / float(4 * self.spreading_factor)) * (self.coding_rate + 4)
+            payload_symbols = 8.0 + math.ceil(float(tmp) / float(4 * self.spreading_factor)) * (
+                self.coding_rate + 4
+            )
         else:
             payload_symbols = 8.0
-        
+
         payload_time = payload_symbols * symbol_time
         air_time_ms = (preamble_time + payload_time) * 1000.0
         timeout_ms = math.ceil(air_time_ms) + 1000
         driver_timeout = timeout_ms * 64
-        
+
         logger.debug(
             f"TX timing SF{self.spreading_factor}/{self.bandwidth/1000:.1f}kHz "
             f"CR4/{self.coding_rate} {packet_length}B: "
@@ -702,7 +696,7 @@ class SX1262Radio(LoRaRadio):
             f"timeout={timeout_ms}ms, "
             f"driver_timeout={driver_timeout}"
         )
-        
+
         return timeout_ms, driver_timeout
 
     def _prepare_packet_transmission(self, data_list: list, length: int) -> None:
@@ -758,14 +752,13 @@ class SX1262Radio(LoRaRadio):
                 else:
                     lbt_attempts += 1
                     if lbt_attempts < max_lbt_attempts:
-
                         # Jitter (50-200ms)
                         base_delay = random.randint(50, 200)
                         # Exponential backoff: base * 2^attempts
                         backoff_ms = base_delay * (2 ** (lbt_attempts - 1))
                         # Cap at 5 seconds maximum
                         backoff_ms = min(backoff_ms, 5000)
-                        
+
                         logger.debug(
                             f"Channel busy (CAD detected activity), backing off {backoff_ms}ms "
                             f"- attempt {lbt_attempts}/{max_lbt_attempts} (exponential backoff)"
@@ -797,23 +790,20 @@ class SX1262Radio(LoRaRadio):
         return True
 
     def _control_tx_rx_pins(self, tx_mode: bool) -> None:
-        """Control TXEN/RXEN pins for TX or RX mode"""
+        """Control TXEN/RXEN pins for the E22 module (simple and deterministic)."""
+
+        # TX: TXEN=HIGH, RXEN=LOW
         if tx_mode:
-            # Control TX mode pins
-            if self.txen_pin != -1 and self._txen_pin_setup:
+            if self.txen_pin != -1:
                 self._gpio_manager.set_pin_high(self.txen_pin)
             if self.rxen_pin != -1:
-                if not hasattr(self, "_rxen_pin_setup") or not self._rxen_pin_setup:
-                    if self._gpio_manager.setup_output_pin(self.rxen_pin, initial_value=True):
-                        self._rxen_pin_setup = True
-                    else:
-                        logger.warning(f"Could not setup RXEN pin {self.rxen_pin}")
                 self._gpio_manager.set_pin_low(self.rxen_pin)
+
+        # RX or idle: TXEN=LOW, RXEN=HIGH
         else:
-            # Control RX mode pins
-            if self.txen_pin != -1 and self._txen_pin_setup:
+            if self.txen_pin != -1:
                 self._gpio_manager.set_pin_low(self.txen_pin)
-            if self.rxen_pin != -1 and hasattr(self, "_rxen_pin_setup") and self._rxen_pin_setup:
+            if self.rxen_pin != -1:
                 self._gpio_manager.set_pin_high(self.rxen_pin)
 
     async def _execute_transmission(self, driver_timeout: int) -> bool:
@@ -917,28 +907,34 @@ class SX1262Radio(LoRaRadio):
         self._control_tx_rx_pins(tx_mode=False)
 
     async def _restore_rx_mode(self) -> None:
-        """Restore radio to RX continuous mode after transmission"""
+        """Restore radio to RX continuous mode after transmission with clean state"""
         try:
             if self.lora:
-                # Add a small delay to ensure radio is ready to transition to RX
-                await asyncio.sleep(0.01)
+                # Force radio to standby to ensure clean transition
+                self.lora.setStandby(self.lora.STANDBY_RC)
+                await asyncio.sleep(0.015)
 
-                # Reconfigure RX interrupts before setting RX mode
+                # Clear ALL interrupt flags from TX operation
+                self.lora.clearIrqStatus(0xFFFF)
+
+                # Configure RX interrupts
                 rx_mask = self._get_rx_irq_mask()
                 self.lora.setDioIrqParams(rx_mask, rx_mask, self.lora.IRQ_NONE, self.lora.IRQ_NONE)
 
+                # Enter RX continuous mode
                 self.lora.setRx(self.lora.RX_CONTINUOUS)
 
-                # Verify the radio actually entered RX mode
-                await asyncio.sleep(0.01)
+                # Allow radio to stabilize in RX mode
+                await asyncio.sleep(0.020)
 
-                # Clear any pending interrupt flags to ensure clean RX state
-                irqStat = self.lora.getIrqStatus()
-                if irqStat != 0:
-                    self.lora.clearIrqStatus(irqStat)
+                # Final cleanup: clear any startup artifacts
+                startup_irq = self.lora.getIrqStatus()
+                if startup_irq != 0:
+                    logger.debug(f"Clearing RX startup IRQ: 0x{startup_irq:04X}")
+                    self.lora.clearIrqStatus(startup_irq)
 
         except Exception as e:
-            logger.warning(f"Failed to set RX mode after TX: {e}")
+            logger.warning(f"Failed to restore RX mode after TX: {e}")
 
     async def send(self, data: bytes) -> None:
         """Send a packet asynchronously"""
