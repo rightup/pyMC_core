@@ -11,8 +11,8 @@ I have made some experimental changes to the cad section that I need to revisit.
 import asyncio
 import logging
 import math
-import random
 import time
+import random
 from typing import Callable, Optional
 
 from gpiozero import Button, Device, OutputDevice
@@ -350,8 +350,6 @@ class SX1262Radio(LoRaRadio):
         """Background task: waits for RX_DONE IRQ and processes received packets automatically."""
         logger.debug("[RX] Starting RX IRQ background task")
         rx_check_count = 0
-        last_preamble_time = 0
-        preamble_timeout = 5.0  # 5 seconds timeout for incomplete preamble detection
         preamble_detect_count = 0  # Counter for preamble detections
         while self._initialized:
             if self._interrupt_setup:
@@ -371,7 +369,6 @@ class SX1262Radio(LoRaRadio):
                             self.lora.clearIrqStatus(irqStat)
 
                         if irqStat & self.lora.IRQ_RX_DONE:
-                            last_preamble_time = 0  # Reset preamble timer on successful RX
                             (
                                 payloadLengthRx,
                                 rxStartBufferPointer,
@@ -406,9 +403,8 @@ class SX1262Radio(LoRaRadio):
                                 logger.warning("[RX] Empty packet received")
                         elif irqStat & self.lora.IRQ_CRC_ERR:
                             logger.warning("[RX] CRC error detected")
-                            last_preamble_time = 0  # Reset preamble timer on CRC error
                         elif irqStat & self.lora.IRQ_TIMEOUT:
-                            last_preamble_time = 0  # Reset preamble timer on timeout
+                            logger.warning("[RX] RX timeout detected")
                         elif irqStat & self.lora.IRQ_PREAMBLE_DETECTED:
                             preamble_detect_count += 1
                             # Log detailed preamble detection info
@@ -420,7 +416,6 @@ class SX1262Radio(LoRaRadio):
                                     )
                             except Exception:
                                 pass
-                            last_preamble_time = time.time()  # Record when preamble was detected
                         elif irqStat & self.lora.IRQ_SYNC_WORD_VALID:
                             pass  # Sync word valid - receiving packet data...
                         elif irqStat & self.lora.IRQ_HEADER_VALID:
@@ -443,42 +438,10 @@ class SX1262Radio(LoRaRadio):
                     # No RX event within timeout - normal operation
                     rx_check_count += 1
 
-                    # Check for stalled preamble detection (preamble detected but no follow-up)
-                    current_time = time.time()
-                    if (
-                        last_preamble_time > 0
-                        and (current_time - last_preamble_time) > preamble_timeout
-                    ):
-                        logger.debug(
-                            f"[RX Task] Preamble timeout detected - {preamble_timeout}s "
-                            f"elapsed since preamble, resetting radio"
-                        )
-                        try:
-                            # Force radio back to RX mode to clear any stuck state
-                            self.lora.setRx(self.lora.RX_CONTINUOUS)
-                            # Clear any pending interrupt flags
-                            irqStat = self.lora.getIrqStatus()
-                            if irqStat != 0:
-                                self.lora.clearIrqStatus(irqStat)
-                        except Exception as e:
-                            logger.error(
-                                f"[RX Task] Failed to reset radio after preamble timeout: {e}"
-                            )
-                        last_preamble_time = 0  # Reset preamble timer
-
                     # Log every 500 checks (roughly every 5 seconds) to show RX task is alive
                     if rx_check_count % 500 == 0:
-                        if rx_check_count % 1000 == 0:
-                            noise_floor_dbm = self.get_noise_floor()
-                            if noise_floor_dbm is not None:
-                                logger.debug(
-                                    f"[RX Task] Status check #{rx_check_count}, "
-                                    f"Noise: {noise_floor_dbm:.1f}dBm"
-                                )
-                            else:
-                                logger.debug(f"[RX Task] Status check #{rx_check_count}")
-                        else:
-                            logger.debug(f"[RX Task] Status check #{rx_check_count}")
+                        logger.debug(f"[RX Task] Status check #{rx_check_count}")
+
             else:
                 await asyncio.sleep(0.1)  # Longer delay when interrupts not set up
 
@@ -496,7 +459,7 @@ class SX1262Radio(LoRaRadio):
 
             # Try IRQ setup - this is REQUIRED, no polling fallback
             try:
-                self.irq_pin = Button(self.irq_pin_number, pull_up=False)
+                self.irq_pin = Button(self.irq_pin_number, pull_up=True)
                 self.irq_pin.when_activated = self._handle_interrupt
                 self._interrupt_setup = True
                 logger.debug(f"[RX] IRQ setup successful on pin {self.irq_pin_number}")
@@ -659,6 +622,7 @@ class SX1262Radio(LoRaRadio):
 
             # Set to RX continuous mode for initial operation
             self.lora.setRx(self.lora.RX_CONTINUOUS)
+            
             self._initialized = True
             logger.info("SX1262 radio initialized successfully")
 
@@ -941,13 +905,26 @@ class SX1262Radio(LoRaRadio):
         """Restore radio to RX continuous mode after transmission"""
         try:
             if self.lora:
-                # Clear any TX interrupt flags and restore RX mode
+                logger.debug("[RX Restore] Starting post-TX recovery sequence")
+                
+                # Clear any TX interrupt flags
                 self.lora.clearIrqStatus(0xFFFF)
 
-                # Configure RX interrupts and return to RX continuous mode
+                # Simple post-TX recovery sequence
+                # Step 1: Go to standby mode first
+                self.lora.setStandby(self.lora.STANDBY_RC)
+                logger.debug("[RX Restore] Set to standby mode")
+                
+                # Step 2: Brief delay to reset AGC calibration
+                await asyncio.sleep(0.1)
+                logger.debug("[RX Restore] Completed AGC reset delay")
+
+                # Step 3: Configure RX interrupts and return to RX continuous mode
                 rx_mask = self._get_rx_irq_mask()
                 self.lora.setDioIrqParams(rx_mask, rx_mask, self.lora.IRQ_NONE, self.lora.IRQ_NONE)
                 self.lora.setRx(self.lora.RX_CONTINUOUS)
+                
+                logger.debug("[RX Restore] Successfully restored to RX mode")
 
         except Exception as e:
             logger.warning(f"Failed to restore RX mode after TX: {e}")
@@ -1027,7 +1004,6 @@ class SX1262Radio(LoRaRadio):
     def get_noise_floor(self) -> Optional[float]:
         """
         Get current noise floor (instantaneous RSSI) in dBm.
-        Simple KISS approach: return 0 if not available, highlight issues clearly.
         """
         if not self._initialized or self.lora is None:
             return 0.0
@@ -1036,23 +1012,13 @@ class SX1262Radio(LoRaRadio):
         if hasattr(self, "_tx_lock") and self._tx_lock.locked():
             return 0.0
 
-        # Check if radio is in RX mode
-        try:
-            current_mode = self.lora.getMode()
-            if current_mode != self.lora.STATUS_MODE_RX:
-                logger.debug(f"Radio not in RX mode (mode=0x{current_mode:02X}) - returning 0")
-                return 0.0
-        except Exception as e:
-            logger.debug(f"Failed to read radio mode: {e}")
-            return 0.0
-
-        # Try to read RSSI - simple approach
+        # Try to read RSSI
         try:
             raw_rssi = self.lora.getRssiInst()
             if raw_rssi is not None:
                 noise_floor_dbm = -(float(raw_rssi) / 2)
                 
-                # Only basic sanity check
+                # Basic sanity check
                 if -150.0 <= noise_floor_dbm <= 10.0:
                     return noise_floor_dbm
                 else:
