@@ -205,6 +205,12 @@ class SX1262Radio(LoRaRadio):
         self._custom_cad_peak = None
         self._custom_cad_min = None
 
+        # Last known good noise floor reading
+        self._last_good_noise_floor = None
+
+        # Track last transmission time for RSSI stabilization
+        self._last_tx_time = 0
+
         logger.info(
             f"SX1262Radio configured: freq={frequency/1e6:.1f}MHz, "
             f"power={tx_power}dBm, sf={spreading_factor}, "
@@ -404,13 +410,6 @@ class SX1262Radio(LoRaRadio):
                             preamble_detect_count += 1
                             # Log detailed preamble detection info
                             try:
-                                raw_rssi = self.lora.getRssiInst()
-                                # Calculate preamble RSSI for potential future use
-                                # preamble_rssi_dbm = (
-                                #     -(float(raw_rssi) / 2)
-                                #     if raw_rssi is not None
-                                #     else "N/A"
-                                # )
                                 if preamble_detect_count % 10 == 0:
                                     logger.warning(
                                         f"[IRQ RX] {preamble_detect_count} preamble detections "
@@ -466,18 +465,16 @@ class SX1262Radio(LoRaRadio):
 
                     # Log every 500 checks (roughly every 5 seconds) to show RX task is alive
                     if rx_check_count % 500 == 0:
-                        # Keep one minimal status message
-                        try:
-                            raw_rssi = self.lora.getRssiInst()
-                            if raw_rssi is not None:
-                                noise_floor_dbm = -(float(raw_rssi) / 2)
+                        if rx_check_count % 1000 == 0:
+                            noise_floor_dbm = self.get_noise_floor()
+                            if noise_floor_dbm is not None:
                                 logger.debug(
                                     f"[RX Task] Status check #{rx_check_count}, "
                                     f"Noise: {noise_floor_dbm:.1f}dBm"
                                 )
                             else:
                                 logger.debug(f"[RX Task] Status check #{rx_check_count}")
-                        except Exception:
+                        else:
                             logger.debug(f"[RX Task] Status check #{rx_check_count}")
             else:
                 await asyncio.sleep(0.1)  # Longer delay when interrupts not set up
@@ -906,32 +903,20 @@ class SX1262Radio(LoRaRadio):
         # Reset TX/RX enable pins after transmission
         self._control_tx_rx_pins(tx_mode=False)
 
+        # Record transmission completion time for RSSI stabilization
+        self._last_tx_time = time.time()
+
     async def _restore_rx_mode(self) -> None:
-        """Restore radio to RX continuous mode after transmission with clean state"""
+        """Restore radio to RX continuous mode after transmission"""
         try:
             if self.lora:
-                # Force radio to standby to ensure clean transition
-                self.lora.setStandby(self.lora.STANDBY_RC)
-                await asyncio.sleep(0.015)
-
-                # Clear ALL interrupt flags from TX operation
+                # Clear any TX interrupt flags and restore RX mode
                 self.lora.clearIrqStatus(0xFFFF)
 
-                # Configure RX interrupts
+                # Configure RX interrupts and return to RX continuous mode
                 rx_mask = self._get_rx_irq_mask()
                 self.lora.setDioIrqParams(rx_mask, rx_mask, self.lora.IRQ_NONE, self.lora.IRQ_NONE)
-
-                # Enter RX continuous mode
                 self.lora.setRx(self.lora.RX_CONTINUOUS)
-
-                # Allow radio to stabilize in RX mode
-                await asyncio.sleep(0.020)
-
-                # Final cleanup: clear any startup artifacts
-                startup_irq = self.lora.getIrqStatus()
-                if startup_irq != 0:
-                    logger.debug(f"Clearing RX startup IRQ: 0x{startup_irq:04X}")
-                    self.lora.clearIrqStatus(startup_irq)
 
         except Exception as e:
             logger.warning(f"Failed to restore RX mode after TX: {e}")
@@ -1011,57 +996,80 @@ class SX1262Radio(LoRaRadio):
     def get_noise_floor(self) -> Optional[float]:
         """
         Get current noise floor (instantaneous RSSI) in dBm.
-        Returns None if radio is not initialized or if reading fails.
         """
         if not self._initialized or self.lora is None:
-            return None
+            return self._last_good_noise_floor
 
         # Skip noise floor reading if we're currently transmitting
         if hasattr(self, "_tx_lock") and self._tx_lock.locked():
-            return None
+            return self._last_good_noise_floor
 
+        # Check if radio is in RX mode FIRST - don't even attempt RSSI reading if not
+        try:
+            current_mode = self.lora.getMode()
+            if current_mode != self.lora.STATUS_MODE_RX:
+                # Radio not in RX mode - don't attempt RSSI_INST reading at all
+                logger.debug(
+                    f"Radio not in RX mode (mode=0x{current_mode:02X}) - "
+                    f"using last good noise floor"
+                )
+                return self._last_good_noise_floor
+        except Exception as e:
+            logger.debug(f"Failed to read radio mode: {e}")
+            return self._last_good_noise_floor
+
+        # Even if radio reports RX mode, RSSI_INST may need time to stabilize
+        # Check if we have a recent transmission that might affect readings
+        current_time = time.time()
+        if hasattr(self, "_last_tx_time") and (current_time - self._last_tx_time) < 0.1:
+            # Less than 100ms since last TX - RSSI_INST might still be unstable
+            tx_elapsed_ms = (current_time - self._last_tx_time) * 1000
+            logger.debug(
+                f"Recent TX detected ({tx_elapsed_ms:.0f}ms ago) - " f"using last good noise floor"
+            )
+            return self._last_good_noise_floor
+
+        # Radio is in RX mode and stable - safe to read RSSI_INST
         try:
             raw_rssi = self.lora.getRssiInst()
             if raw_rssi is not None:
                 noise_floor_dbm = -(float(raw_rssi) / 2)
-                # Validate reading - reject obviously invalid values
-                if -150.0 <= noise_floor_dbm <= -50.0:
+
+                # Aggressive corruption detection for SX1262 RSSI_INST instability
+                # The -76/-77dBm readings are a specific corruption pattern after TX
+                if -78.0 <= noise_floor_dbm <= -74.0:
+                    # This is likely the characteristic SX1262 corruption pattern
+                    logger.debug(
+                        f"Detected SX1262 RSSI corruption pattern: "
+                        f"{noise_floor_dbm:.1f}dBm - using last good: "
+                        f"{self._last_good_noise_floor}"
+                    )
+                    return self._last_good_noise_floor
+
+                # Validate reading - accept reasonable range
+                if -150.0 <= noise_floor_dbm <= -30.0:
+                    # Valid reading - cache it and return
+                    self._last_good_noise_floor = noise_floor_dbm
+                    return noise_floor_dbm
+                elif -30.0 < noise_floor_dbm <= 10.0:
+                    # Strong signal range - cache and return but log it
+                    logger.debug(f"Strong signal detected: {noise_floor_dbm:.1f}dBm")
+                    self._last_good_noise_floor = noise_floor_dbm
                     return noise_floor_dbm
                 else:
-                    # Invalid reading detected - trigger radio state reset
+                    # Invalid reading - log but return last known good
                     logger.debug(
-                        f"Invalid noise floor reading: {noise_floor_dbm:.1f}dBm - resetting radio"
+                        f"Invalid RSSI reading: {noise_floor_dbm:.1f}dBm - "
+                        f"using last good: {self._last_good_noise_floor}"
                     )
-                    self._reset_radio_state()
-                    return None
-            return None
+                    return self._last_good_noise_floor
+
+            # No reading available - return last known good
+            return self._last_good_noise_floor
+
         except Exception as e:
             logger.debug(f"Failed to read noise floor: {e}")
-            return None
-
-    def _reset_radio_state(self) -> None:
-        """Reset radio state to recover from invalid RSSI readings"""
-        if not self._initialized or self.lora is None:
-            return
-
-        try:
-            # Force radio back to standby then RX mode
-            self.lora.setStandby(self.lora.STANDBY_RC)
-            time.sleep(0.05)  # Let radio settle
-
-            # Clear interrupt flags
-            irq_status = self.lora.getIrqStatus()
-            if irq_status != 0:
-                self.lora.clearIrqStatus(irq_status)
-
-            # Restore RX mode
-            rx_mask = self._get_rx_irq_mask()
-            self.lora.setDioIrqParams(rx_mask, rx_mask, self.lora.IRQ_NONE, self.lora.IRQ_NONE)
-            self.lora.setRx(self.lora.RX_CONTINUOUS)
-
-            logger.debug("Radio state reset completed")
-        except Exception as e:
-            logger.warning(f"Failed to reset radio state: {e}")
+            return self._last_good_noise_floor
 
     def set_frequency(self, frequency: int) -> bool:
         """Set operating frequency"""
