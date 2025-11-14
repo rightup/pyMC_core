@@ -440,6 +440,13 @@ class SX1262Radio(LoRaRadio):
                 else:
                     logger.warning(f"Could not setup TXEN pin {self.txen_pin}")
 
+            # Setup RXEN pin if needed
+            if self.rxen_pin != -1:
+                if self._gpio_manager.setup_output_pin(self.rxen_pin, initial_value=True):
+                    logger.debug(f"RXEN pin {self.rxen_pin} configured")
+                else:
+                    logger.warning(f"Could not setup RXEN pin {self.rxen_pin}")
+
             # Setup LED pins if specified
             if self.txled_pin != -1 and not self._txled_pin_setup:
                 if self._gpio_manager.setup_output_pin(self.txled_pin, initial_value=False):
