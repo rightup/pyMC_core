@@ -180,7 +180,7 @@ class GPIOPinManager:
 
         except RuntimeError:
             # No event loop running - just turn on LED (won't auto-turn off)
-            logger.debug(f"No event loop, LED pin {pin_number} turned on (manual off required)")
+            logger.warning(f"No event loop, LED pin {pin_number} turned on (manual off required)")
             self.set_pin_high(pin_number)
         except Exception as e:
             logger.warning(f"Failed to start LED task for pin {pin_number}: {e}")
