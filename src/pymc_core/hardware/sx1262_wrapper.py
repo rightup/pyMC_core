@@ -134,6 +134,8 @@ class SX1262Radio(LoRaRadio):
         preamble_length: int = 12,
         sync_word: int = 0x3444,
         is_waveshare: bool = False,
+        use_dio3_tcxo: bool = True,
+        dio3_tcxo_voltage: float = 1.8,
     ):
         """
         Initialize SX1262 radio
@@ -155,6 +157,8 @@ class SX1262Radio(LoRaRadio):
             preamble_length: Preamble length (default: 12)
             sync_word: Sync word (default: 0x3444 for public network)
             is_waveshare: Use alternate initialization needed for Waveshare HAT
+            use_dio3_tcxo: Enable DIO3 TCXO control (default: False)
+            dio3_tcxo_voltage: TCXO reference voltage in volts (default: 1.8)
         """
         # Check if there's already an active instance and clean it up
         if SX1262Radio._active_instance is not None:
@@ -183,6 +187,8 @@ class SX1262Radio(LoRaRadio):
         self.preamble_length = preamble_length
         self.sync_word = sync_word
         self.is_waveshare = is_waveshare
+        self.use_dio3_tcxo = use_dio3_tcxo
+        self.dio3_tcxo_voltage = dio3_tcxo_voltage
 
         # State variables
         self.lora: Optional[SX126x] = None
@@ -204,9 +210,6 @@ class SX1262Radio(LoRaRadio):
         # Custom CAD thresholds (None means use defaults)
         self._custom_cad_peak = None
         self._custom_cad_min = None
-
-        # Last known good noise floor reading
-        self._last_good_noise_floor = None
 
         # Track last transmission time for RSSI stabilization
         self._last_tx_time = 0
@@ -570,7 +573,35 @@ class SX1262Radio(LoRaRadio):
                     return False
 
                 # Configure TCXO, regulator, calibration and RF switch
-                self.lora.setDio3TcxoCtrl(self.lora.DIO3_OUTPUT_1_8, self.lora.TCXO_DELAY_5)
+                if self.use_dio3_tcxo:
+                    # Map voltage to DIO3 constants following Meshtastic pattern
+                    voltage_map = {
+                        1.6: self.lora.DIO3_OUTPUT_1_6,
+                        1.7: self.lora.DIO3_OUTPUT_1_7, 
+                        1.8: self.lora.DIO3_OUTPUT_1_8,
+                        2.2: self.lora.DIO3_OUTPUT_2_2,
+                        2.4: self.lora.DIO3_OUTPUT_2_4,
+                        2.7: self.lora.DIO3_OUTPUT_2_7,
+                        3.0: self.lora.DIO3_OUTPUT_3_0,
+                        3.3: self.lora.DIO3_OUTPUT_3_3,
+                    }
+                    # Find closest voltage match
+                    voltage_constant = voltage_map.get(self.dio3_tcxo_voltage)
+                    if voltage_constant is None:
+                        # Find closest match
+                        closest_voltage = min(voltage_map.keys(), key=lambda x: abs(x - self.dio3_tcxo_voltage))
+                        voltage_constant = voltage_map[closest_voltage]
+                        logger.debug(f"DIO3 TCXO voltage {self.dio3_tcxo_voltage}V mapped to closest {closest_voltage}V")
+                    else:
+                        logger.debug(f"DIO3 TCXO voltage {self.dio3_tcxo_voltage}V mapped exactly")
+                    
+                    # Set TCXO with 5ms delay (standard value)
+                    self.lora.setDio3TcxoCtrl(voltage_constant, self.lora.TCXO_DELAY_5)
+                    logger.info(f"DIO3 TCXO enabled: {self.dio3_tcxo_voltage}V, 5ms delay")
+                    time.sleep(0.05)  # Allow TCXO to stabilize
+                else:
+                    logger.debug("DIO3 TCXO is not enabled")
+                
                 self.lora.setRegulatorMode(self.lora.REGULATOR_DC_DC)
                 self.lora.calibrate(0x7F)
                 self.lora.setDio2RfSwitch()
@@ -996,80 +1027,43 @@ class SX1262Radio(LoRaRadio):
     def get_noise_floor(self) -> Optional[float]:
         """
         Get current noise floor (instantaneous RSSI) in dBm.
+        Simple KISS approach: return 0 if not available, highlight issues clearly.
         """
         if not self._initialized or self.lora is None:
-            return self._last_good_noise_floor
+            return 0.0
 
-        # Skip noise floor reading if we're currently transmitting
+        # If currently transmitting, return 0 (clear indicator)
         if hasattr(self, "_tx_lock") and self._tx_lock.locked():
-            return self._last_good_noise_floor
+            return 0.0
 
-        # Check if radio is in RX mode FIRST - don't even attempt RSSI reading if not
+        # Check if radio is in RX mode
         try:
             current_mode = self.lora.getMode()
             if current_mode != self.lora.STATUS_MODE_RX:
-                # Radio not in RX mode - don't attempt RSSI_INST reading at all
-                logger.debug(
-                    f"Radio not in RX mode (mode=0x{current_mode:02X}) - "
-                    f"using last good noise floor"
-                )
-                return self._last_good_noise_floor
+                logger.debug(f"Radio not in RX mode (mode=0x{current_mode:02X}) - returning 0")
+                return 0.0
         except Exception as e:
             logger.debug(f"Failed to read radio mode: {e}")
-            return self._last_good_noise_floor
+            return 0.0
 
-        # Even if radio reports RX mode, RSSI_INST may need time to stabilize
-        # Check if we have a recent transmission that might affect readings
-        current_time = time.time()
-        if hasattr(self, "_last_tx_time") and (current_time - self._last_tx_time) < 0.1:
-            # Less than 100ms since last TX - RSSI_INST might still be unstable
-            tx_elapsed_ms = (current_time - self._last_tx_time) * 1000
-            logger.debug(
-                f"Recent TX detected ({tx_elapsed_ms:.0f}ms ago) - " f"using last good noise floor"
-            )
-            return self._last_good_noise_floor
-
-        # Radio is in RX mode and stable - safe to read RSSI_INST
+        # Try to read RSSI - simple approach
         try:
             raw_rssi = self.lora.getRssiInst()
             if raw_rssi is not None:
                 noise_floor_dbm = -(float(raw_rssi) / 2)
-
-                # Aggressive corruption detection for SX1262 RSSI_INST instability
-                # The -76/-77dBm readings are a specific corruption pattern after TX
-                if -78.0 <= noise_floor_dbm <= -74.0:
-                    # This is likely the characteristic SX1262 corruption pattern
-                    logger.debug(
-                        f"Detected SX1262 RSSI corruption pattern: "
-                        f"{noise_floor_dbm:.1f}dBm - using last good: "
-                        f"{self._last_good_noise_floor}"
-                    )
-                    return self._last_good_noise_floor
-
-                # Validate reading - accept reasonable range
-                if -150.0 <= noise_floor_dbm <= -30.0:
-                    # Valid reading - cache it and return
-                    self._last_good_noise_floor = noise_floor_dbm
-                    return noise_floor_dbm
-                elif -30.0 < noise_floor_dbm <= 10.0:
-                    # Strong signal range - cache and return but log it
-                    logger.debug(f"Strong signal detected: {noise_floor_dbm:.1f}dBm")
-                    self._last_good_noise_floor = noise_floor_dbm
+                
+                # Only basic sanity check
+                if -150.0 <= noise_floor_dbm <= 10.0:
                     return noise_floor_dbm
                 else:
-                    # Invalid reading - log but return last known good
-                    logger.debug(
-                        f"Invalid RSSI reading: {noise_floor_dbm:.1f}dBm - "
-                        f"using last good: {self._last_good_noise_floor}"
-                    )
-                    return self._last_good_noise_floor
-
-            # No reading available - return last known good
-            return self._last_good_noise_floor
+                    logger.debug(f"Invalid RSSI reading: {noise_floor_dbm:.1f}dBm - returning 0")
+                    return 0.0
+            else:
+                return 0.0
 
         except Exception as e:
             logger.debug(f"Failed to read noise floor: {e}")
-            return self._last_good_noise_floor
+            return 0.0
 
     def set_frequency(self, frequency: int) -> bool:
         """Set operating frequency"""
@@ -1355,6 +1349,15 @@ CONFIGS = {
         "bandwidth": 125000,
         "coding_rate": 5,
     },
+    "eu868_e22": {
+        "frequency": 868000000,
+        "tx_power": 14,
+        "spreading_factor": 7,
+        "bandwidth": 125000,
+        "coding_rate": 5,
+        "use_dio3_tcxo": True,
+  
+    },
     "us915": {
         "frequency": 915000000,
         "tx_power": 20,
@@ -1362,11 +1365,29 @@ CONFIGS = {
         "bandwidth": 125000,
         "coding_rate": 5,
     },
+    "us915_e22": {
+        "frequency": 915000000,
+        "tx_power": 20,
+        "spreading_factor": 7,
+        "bandwidth": 125000,
+        "coding_rate": 5,
+        "use_dio3_tcxo": True,
+   
+    },
     "as923": {
         "frequency": 923000000,
         "tx_power": 16,
         "spreading_factor": 7,
         "bandwidth": 125000,
         "coding_rate": 5,
+    },
+    "as923_e22": {
+        "frequency": 923000000,
+        "tx_power": 16,
+        "spreading_factor": 7,
+        "bandwidth": 125000,
+        "coding_rate": 5,
+        "use_dio3_tcxo": True,
+  
     },
 }
