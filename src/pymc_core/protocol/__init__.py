@@ -71,6 +71,7 @@ from .packet_utils import (
     PacketValidationUtils,
     RouteTypeUtils,
 )
+from .transport_keys import calc_transport_code, get_auto_key_for
 from .utils import decode_appdata, parse_advert_payload
 
 __all__ = [
@@ -85,6 +86,8 @@ __all__ = [
     "parse_advert_payload",
     "decode_appdata",
     "describe_advert_flags",
+    "get_auto_key_for",
+    "calc_transport_code",
     # Utility classes
     "PacketValidationUtils",
     "PacketDataUtils",
