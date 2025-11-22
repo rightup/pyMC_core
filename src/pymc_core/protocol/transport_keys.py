@@ -47,6 +47,8 @@ def calc_transport_code(key: bytes, packet) -> int:
     Returns:
         int: 16-bit transport code
     """
+    if len(key) != 16:
+        raise ValueError(f"Transport key must be 16 bytes, got {len(key)}")
     payload_type = packet.get_payload_type()
     payload_data = packet.get_payload()
     
