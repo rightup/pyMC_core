@@ -23,6 +23,12 @@ def get_auto_key_for(name: str) -> bytes:
     Returns:
         bytes: 16-byte transport key
     """
+    if not name:
+        raise ValueError("Region name cannot be empty")
+    if not name.startswith('#'):
+        raise ValueError("Region name must start with '#'")
+    if len(name) > 64:
+        raise ValueError("Region name is too long (max 64 characters)")
     key_hash = CryptoUtils.sha256(name.encode('ascii'))
     return key_hash[:16]  # First 16 bytes (128 bits)
 
