@@ -138,7 +138,7 @@ class Packet:
             int: Route type value (0-3) indicating routing method:
                 - 0: Transport flood routing (with transport codes)
                 - 1: Flood routing
-                - 2: Direct routing  
+                - 2: Direct routing
                 - 3: Transport direct routing (with transport codes)
         """
         return self.header & PH_ROUTE_MASK
