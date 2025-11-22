@@ -8,6 +8,10 @@ from .constants import (
     PH_VER_MASK,
     PH_VER_SHIFT,
     PUB_KEY_SIZE,
+    ROUTE_TYPE_DIRECT,
+    ROUTE_TYPE_FLOOD,
+    ROUTE_TYPE_TRANSPORT_DIRECT,
+    ROUTE_TYPE_TRANSPORT_FLOOD,
     SIGNATURE_SIZE,
     TIMESTAMP_SIZE,
 )
@@ -22,6 +26,9 @@ from .packet_utils import PacketDataUtils, PacketHashingUtils, PacketValidationU
 ║ Header (1 byte)    ║ Encodes route type (2 bits), payload type (4 bits),  ║
 ║                    ║ and version (2 bits).                                ║
 ╠════════════════════╬══════════════════════════════════════════════════════╣
+║ Transport Codes    ║ Two 16-bit codes (4 bytes total). Only present for   ║
+║ (0 or 4 bytes)     ║ TRANSPORT_FLOOD and TRANSPORT_DIRECT route types.    ║
+╠════════════════════╬══════════════════════════════════════════════════════╣
 ║ Path Length (1 B)  ║ Number of path hops (0–15).                          ║
 ╠════════════════════╬══════════════════════════════════════════════════════╣
 ║ Path (N bytes)     ║ List of node hashes (1 byte each), length = path_len ║
@@ -35,8 +42,9 @@ Header Layout (1 byte):
 ╔═══════════╦════════════╦════════════════════════════════╗
 ║ Bits      ║ Name       ║ Meaning                        ║
 ╠═══════════╬════════════╬════════════════════════════════╣
-║ 0–1       ║ RouteType  ║ 00: Flood, 01: Direct,         ║
-║           ║            ║ 10: TransportFlood, 11: Direct ║
+║ 0–1       ║ RouteType  ║ 00: TransportFlood,            ║
+║           ║            ║ 01: Flood, 10: Direct,         ║
+║           ║            ║ 11: TransportDirect            ║
 ╠═══════════╬════════════╬════════════════════════════════╣
 ║ 2–5       ║ PayloadType║ See PAYLOAD_TYPE_* constants   ║
 ╠═══════════╬════════════╬════════════════════════════════╣
@@ -45,6 +53,7 @@ Header Layout (1 byte):
 
 Notes:
 - `write_to()` and `read_from()` enforce the exact structure used in firmware.
+- Transport codes are included only for route types 0x00 and 0x03.
 - Payload size must be ≤ MAX_PACKET_PAYLOAD (typically 254).
 - `calculate_packet_hash()` includes payload type + path_len (only for TRACE).
 """
@@ -52,7 +61,7 @@ Notes:
 
 class Packet:
     """
-    Represents a mesh network packet with header, path, and payload components.
+    Represents a mesh network packet with header, transport codes, path, and payload components.
 
     This class handles serialization and deserialization of packets in the mesh protocol,
     providing methods for packet validation, hashing, and data extraction. It maintains
@@ -60,6 +69,7 @@ class Packet:
 
     Attributes:
         header (int): Single byte header containing packet type and flags.
+        transport_codes (list): Two 16-bit transport codes for TRANSPORT route types.
         path_len (int): Length of the path component in bytes.
         path (bytearray): Variable-length path data for routing.
         payload (bytearray): Variable-length payload data.
@@ -70,7 +80,7 @@ class Packet:
     Example:
         ```python
         packet = Packet()
-        packet.header = 0x01
+        packet.header = 0x01  # Flood routing
         packet.path = b"node1->node2"
         packet.path_len = len(packet.path)
         packet.payload = b"Hello World"
@@ -97,6 +107,7 @@ class Packet:
         "payload_len",
         "path",
         "payload",
+        "transport_codes",
         "_snr",
         "_rssi",
     )
@@ -115,6 +126,7 @@ class Packet:
         self.decrypted = {}
         self.path_len = 0
         self.payload_len = 0
+        self.transport_codes = [0, 0]  # Array of two 16-bit transport codes
         self._snr = 0
         self._rssi = 0
 
@@ -124,10 +136,10 @@ class Packet:
 
         Returns:
             int: Route type value (0-3) indicating routing method:
-                - 0: Flood routing
-                - 1: Direct routing
-                - 2: Transport flood routing
-                - 3: Reserved
+                - 0: Transport flood routing (with transport codes)
+                - 1: Flood routing
+                - 2: Direct routing
+                - 3: Transport direct routing (with transport codes)
         """
         return self.header & PH_ROUTE_MASK
 
@@ -156,6 +168,37 @@ class Packet:
                 Higher versions may include additional features or format changes.
         """
         return (self.header >> PH_VER_SHIFT) & PH_VER_MASK
+
+    def has_transport_codes(self) -> bool:
+        """
+        Check if this packet includes transport codes in its format.
+
+        Returns:
+            bool: True if the packet uses transport flood or transport direct
+                routing, which includes 4 bytes of transport codes after the header.
+        """
+        route_type = self.get_route_type()
+        return route_type == ROUTE_TYPE_TRANSPORT_FLOOD or route_type == ROUTE_TYPE_TRANSPORT_DIRECT
+
+    def is_route_flood(self) -> bool:
+        """
+        Check if this packet uses flood routing (with or without transport codes).
+
+        Returns:
+            bool: True if the packet uses any form of flood routing.
+        """
+        route_type = self.get_route_type()
+        return route_type == ROUTE_TYPE_TRANSPORT_FLOOD or route_type == ROUTE_TYPE_FLOOD
+
+    def is_route_direct(self) -> bool:
+        """
+        Check if this packet uses direct routing (with or without transport codes).
+
+        Returns:
+            bool: True if the packet uses any form of direct routing.
+        """
+        route_type = self.get_route_type()
+        return route_type == ROUTE_TYPE_TRANSPORT_DIRECT or route_type == ROUTE_TYPE_DIRECT
 
     def get_payload(self) -> bytes:
         """
@@ -227,7 +270,8 @@ class Packet:
 
         Returns:
             bytes: Serialized packet data in the format:
-                ``header(1) | path_len(1) | path(N) | payload(M)``
+                ``header(1) | [transport_codes(4)] | path_len(1) | path(N) | payload(M)``
+                Transport codes are only included if has_transport_codes() is True.
 
         Raises:
             ValueError: If internal length values don't match actual buffer lengths,
@@ -236,6 +280,13 @@ class Packet:
         self._validate_lengths()
 
         out = bytearray([self.header])
+        
+        # Add transport codes if this packet type requires them
+        if self.has_transport_codes():
+            # Pack two 16-bit transport codes (4 bytes total) in little-endian format
+            out.extend(self.transport_codes[0].to_bytes(2, 'little'))
+            out.extend(self.transport_codes[1].to_bytes(2, 'little'))
+        
         out.append(self.path_len)
         out += self.path
         out += self.payload[: self.payload_len]
@@ -261,6 +312,16 @@ class Packet:
         idx, data_len = 0, len(data)
         self.header = data[idx]
         idx += 1
+
+        # Read transport codes if present
+        if self.has_transport_codes():
+            self._check_bounds(idx, 4, data_len, "missing transport codes")
+            # Unpack two 16-bit transport codes from little-endian format
+            self.transport_codes[0] = int.from_bytes(data[idx:idx+2], 'little')
+            self.transport_codes[1] = int.from_bytes(data[idx+2:idx+4], 'little')
+            idx += 4
+        else:
+            self.transport_codes = [0, 0]
 
         self._check_bounds(idx, 1, data_len, "missing path_len")
         self.path_len = data[idx]
@@ -328,12 +389,14 @@ class Packet:
 
         Returns:
             int: Total packet size in bytes, calculated as:
-                header(1) + path_len(1) + path(N) + payload(M)
+                header(1) + [transport_codes(4)] + path_len(1) + path(N) + payload(M)
+                Transport codes are only included if has_transport_codes() is True.
 
         Note:
             This matches the wire format used by write_to() and expected by read_from().
         """
-        return 2 + self.path_len + self.payload_len  # header + path_len + path + payload
+        base_length = 2 + self.path_len + self.payload_len  # header + path_len + path + payload
+        return base_length + (4 if self.has_transport_codes() else 0)
 
     def get_snr(self) -> float:
         """
