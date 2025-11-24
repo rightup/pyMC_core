@@ -360,12 +360,13 @@ class Packet:
             self.get_payload_type(), self.path_len, self.payload
         )
 
-    def get_packet_hash_hex(self, length: int = 16) -> str:
+    def get_packet_hash_hex(self, length: int | None = None) -> str:
         """
         Return upper-case hex string representation of this packet's hash.
 
         Args:
-            length (int, optional): Maximum length of the returned hex string (default 16).
+            length (int | None, optional): Maximum length of the returned hex string.
+                Defaults to None (full hash string).
 
         Returns:
             str: Upper-case hex string of the packet hash.
