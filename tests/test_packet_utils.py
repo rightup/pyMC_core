@@ -3,7 +3,11 @@ import struct
 import pytest
 
 from pymc_core.protocol.constants import MAX_PACKET_PAYLOAD, MAX_PATH_SIZE
-from pymc_core.protocol.packet_utils import PacketDataUtils, PacketValidationUtils
+from pymc_core.protocol.packet_utils import (
+    PacketDataUtils,
+    PacketHashingUtils,
+    PacketValidationUtils,
+)
 
 
 class TestPacketValidationUtils:
@@ -139,3 +143,40 @@ class TestPacketDataUtils:
         result = PacketDataUtils.pack_timestamp_data(0)
         expected = struct.pack("<I", 0)
         assert result == expected
+
+
+class TestPacketHashingUtils:
+    def test_hash_string_returns_full_uppercase_hex(self):
+        payload_type = 0x05
+        path_len = 0
+        payload = bytes.fromhex("D9BA8E4EA9444822AC56B4D52AC3C0044C6AE402997BB9805CCB331EC3378DCE339F2D")
+
+        expected_hex = "887B9BE6056D0B0517AF3A04AC2478EDFC2AB731936DEA525041500E7ADE74D3"
+
+        result = PacketHashingUtils.calculate_packet_hash_string(
+            payload_type=payload_type,
+            path_len=path_len,
+            payload=payload,
+            length=None,
+        )
+
+        assert result == expected_hex
+        assert result.isupper()
+
+    def test_hash_string_truncates_to_requested_length(self):
+        payload_type = 0x05
+        path_len = 1
+        payload = bytes.fromhex("D9BA8E4EA9444822AC56B4D52AC3C0044C6AE402997BB9805CCB331EC3378DCE339F2D")
+
+        expected_hex = "887B9BE6056D0B05"
+
+        truncated = PacketHashingUtils.calculate_packet_hash_string(
+            payload_type=payload_type,
+            path_len=path_len,
+            payload=payload,
+            length=16,
+        )
+
+        assert truncated == expected_hex[:16]
+        assert len(truncated) == 16
+        assert truncated.isupper()
