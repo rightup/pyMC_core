@@ -219,6 +219,29 @@ class PacketHashingUtils:
         return sha.digest()[:MAX_HASH_SIZE]
 
     @staticmethod
+    def calculate_packet_hash_string(
+        payload_type: int,
+        path_len: int,
+        payload: bytes,
+        length: int | None = None,
+    ) -> str:
+        """
+        Return upper-case hex string representation of the packet hash.
+
+        Args:
+            payload_type: Packet payload type
+            path_len: Path length (only used for TRACE packets)
+            payload: Packet payload bytes
+            length: Optional maximum length of the returned hex string.
+
+        Returns:
+            str: Upper-case hex string of the packet hash, optionally truncated.
+        """
+        raw_hash = PacketHashingUtils.calculate_packet_hash(payload_type, path_len, payload)
+        hex_str = raw_hash.hex().upper()
+        return hex_str if length is None else hex_str[:length]
+
+    @staticmethod
     def calculate_crc(payload_type: int, path_len: int, payload: bytes) -> int:
         """Calculate 4-byte CRC from packet hash."""
         hash_bytes = PacketHashingUtils.calculate_packet_hash(payload_type, path_len, payload)

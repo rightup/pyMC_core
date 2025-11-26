@@ -360,6 +360,24 @@ class Packet:
             self.get_payload_type(), self.path_len, self.payload
         )
 
+    def get_packet_hash_hex(self, length: int | None = None) -> str:
+        """
+        Return upper-case hex string representation of this packet's hash.
+
+        Args:
+            length (int | None, optional): Maximum length of the returned hex string.
+                Defaults to None (full hash string).
+
+        Returns:
+            str: Upper-case hex string of the packet hash.
+        """
+        return PacketHashingUtils.calculate_packet_hash_string(
+            payload_type=self.get_payload_type(),
+            path_len=self.path_len,
+            payload=self.payload,
+            length=length,
+        )
+
     def get_crc(self) -> int:
         """
         Calculate a 4-byte CRC from SHA256 digest for ACK confirmation.
