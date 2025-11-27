@@ -23,7 +23,7 @@ ADV_TYPE_ROOM_SERVER = 3
 async def respond_to_discovery(
     radio_type: str = "waveshare",
     serial_port: str = "/dev/ttyUSB0",
-    node_type: int = ADV_TYPE_CHAT_NODE,
+    node_type: int = ADV_TYPE_REPEATER,
 ):
     """
     Listen for discovery requests and respond with node information.
@@ -37,7 +37,7 @@ async def respond_to_discovery(
 
     # Get our public key for responses
     our_pub_key = identity.get_public_key()
-    
+
     # Node type names for logging
     node_type_names = {
         ADV_TYPE_CHAT_NODE: "Chat Node",
@@ -68,7 +68,7 @@ async def respond_to_discovery(
 
         # Create and send discovery response
         print(f"   ↳ Sending response...")
-        
+
         pkt = PacketBuilder.create_discovery_response(
             tag=tag,
             node_type=node_type,
