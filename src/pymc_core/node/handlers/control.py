@@ -6,7 +6,7 @@ These are zero-hop packets used for network topology discovery.
 
 import struct
 import time
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict
 
 from ...protocol import Packet
 from ...protocol.constants import PAYLOAD_TYPE_CONTROL
