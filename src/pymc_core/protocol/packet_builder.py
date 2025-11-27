@@ -978,10 +978,8 @@ class PacketBuilder:
         # First byte: CTL_TYPE_NODE_DISCOVER_RESP (0x90) + node_type (lower 4 bits)
         payload.append(0x90 | (node_type & 0x0F))
         
-        # SNR byte (multiply by 4 and convert to signed byte)
-        snr_byte = int(inbound_snr * 4)
-        if snr_byte < 0:
-            snr_byte = (256 + snr_byte) & 0xFF
+        # SNR byte (multiply by 4, clamp to signed int8_t range, and encode as unsigned byte)
+        snr_byte = max(-128, min(127, int(inbound_snr * 4)))
         payload.append(snr_byte & 0xFF)
         
         # Tag (4 bytes, little-endian)
