@@ -23,12 +23,15 @@ from common import create_mesh_node
 
 from pymc_core.protocol.packet_builder import PacketBuilder
 
+# ADV_TYPE_REPEATER = 2, so filter mask is (1 << 2) = 0x04
+FILTER_REPEATERS = 0x04  # Bit 2 set for repeater node type
+
 
 async def discover_nodes(
     radio_type: str = "waveshare",
     serial_port: str = "/dev/ttyUSB0",
     timeout: float = 5.0,
-    filter_mask: int = 0x02,
+    filter_mask: int = FILTER_REPEATERS,
 ):
     """
     Discover nearby mesh nodes using control packets.
@@ -37,7 +40,7 @@ async def discover_nodes(
         radio_type: Radio hardware type ("waveshare", "uconsole", etc.)
         serial_port: Serial port for KISS TNC
         timeout: How long to wait for responses (seconds)
-        filter_mask: Node types to discover (0x02 = repeaters only)
+        filter_mask: Node types to discover (CONTACT_TYPE_REPEATER = repeaters only)
     """
     mesh_node, identity = create_mesh_node("DiscoveryNode", radio_type, serial_port)
 
@@ -90,7 +93,7 @@ async def discover_nodes(
     control_handler.set_response_callback(discovery_tag, on_discovery_response)
 
     # Create discovery request packet
-    # filter_mask: 0x02 = bit 1 set = discover repeaters
+    # filter_mask: 0x04 = bit 2 set (1 << ADV_TYPE_REPEATER where ADV_TYPE_REPEATER=2)
     # since: 0 = discover all nodes regardless of modification time
     pkt = PacketBuilder.create_discovery_request(
         tag=discovery_tag, filter_mask=filter_mask, since=0, prefix_only=False
@@ -164,8 +167,8 @@ def main():
     parser.add_argument(
         "--filter",
         type=lambda x: int(x, 0),
-        default=0x02,
-        help="Node type filter mask (default: 0x02 for repeaters)",
+        default=FILTER_REPEATERS,
+        help="Node type filter mask (default: 0x04 for repeaters, bit position = node type)",
     )
 
     args = parser.parse_args()

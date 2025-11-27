@@ -907,8 +907,8 @@ class PacketBuilder:
             ```python
             import random
             tag = random.randint(0, 0xFFFFFFFF)
-            # Filter for repeaters (bit 1)
-            packet = PacketBuilder.create_discovery_request(tag, filter_mask=0x02)
+            # Filter for repeaters: ADV_TYPE_REPEATER=2, so (1 << 2) = 0x04
+            packet = PacketBuilder.create_discovery_request(tag, filter_mask=0x04)
             # Send as zero-hop broadcast
             ```
         """

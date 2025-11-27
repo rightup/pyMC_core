@@ -15,9 +15,6 @@ from ...protocol.constants import PAYLOAD_TYPE_CONTROL
 CTL_TYPE_NODE_DISCOVER_REQ = 0x80  # Discovery request
 CTL_TYPE_NODE_DISCOVER_RESP = 0x90  # Discovery response
 
-# Node type filter flags (bit positions in filter byte)
-ADV_TYPE_REPEATER = 1
-
 
 class ControlHandler:
     """Handler for control packets (payload type 0x0B).

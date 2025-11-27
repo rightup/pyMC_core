@@ -49,6 +49,8 @@ PAYLOAD_TYPES = {
     0x07: "ANON_REQ",
     0x08: "PATH",
     0x09: "TRACE",
+    0x0A: "MULTIPART",
+    0x0B: "CONTROL",
     0x0F: "RAW_CUSTOM",
 }
 
