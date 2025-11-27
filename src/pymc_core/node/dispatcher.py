@@ -18,6 +18,7 @@ from .handlers import (
     AckHandler,
     AdvertHandler,
     AnonReqResponseHandler,
+    ControlHandler,
     GroupTextHandler,
     LoginResponseHandler,
     PathHandler,
@@ -226,6 +227,15 @@ class Dispatcher:
         )
         # Keep a reference for the node
         self.trace_handler = trace_handler
+
+        # CONTROL handler for node discovery
+        control_handler = ControlHandler(self._log)
+        self.register_handler(
+            ControlHandler.payload_type(),
+            control_handler,
+        )
+        # Keep a reference for the node
+        self.control_handler = control_handler
 
         self._logger.info("Default handlers registered.")
 

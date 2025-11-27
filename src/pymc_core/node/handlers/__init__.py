@@ -5,6 +5,7 @@ Message handlers for different packet types
 from .ack import AckHandler
 from .advert import AdvertHandler
 from .base import BaseHandler
+from .control import ControlHandler
 from .group_text import GroupTextHandler
 from .login_response import AnonReqResponseHandler, LoginResponseHandler
 from .path import PathHandler
@@ -23,4 +24,5 @@ __all__ = [
     "ProtocolResponseHandler",
     "AnonReqResponseHandler",
     "TraceHandler",
+    "ControlHandler",
 ]
