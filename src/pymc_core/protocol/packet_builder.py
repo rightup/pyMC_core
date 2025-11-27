@@ -896,7 +896,7 @@ class PacketBuilder:
 
         Args:
             tag: Random identifier to match responses (uint32_t).
-            filter_mask: Bitfield of node types to discover (bit 1 = repeaters).
+            filter_mask: Bitmask of node types to discover; the bit at position `node_type` is set to select that type (e.g., for ADV_TYPE_REPEATER=2, use (1 << 2) == 0x04).
             since: Optional timestamp - only nodes modified after this respond (uint32_t).
             prefix_only: Request 8-byte key prefix instead of full 32-byte key.
 
