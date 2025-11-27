@@ -59,7 +59,7 @@ async def discover_nodes(
         timestamp = response_data.get("timestamp", 0)
 
         # Get node type name
-        node_type_names = {1: "Repeater", 2: "Chat Node", 3: "Room Server"}
+        node_type_names = {1: "Chat Node", 2: "Repeater", 3: "Room Server"}
         node_type_name = node_type_names.get(node_type, f"Unknown({node_type})")
 
         # Store node info
