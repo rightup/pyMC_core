@@ -110,6 +110,7 @@ class Packet:
         "transport_codes",
         "_snr",
         "_rssi",
+        "_do_not_retransmit",
     )
 
     def __init__(self):
@@ -129,6 +130,7 @@ class Packet:
         self.transport_codes = [0, 0]  # Array of two 16-bit transport codes
         self._snr = 0
         self._rssi = 0
+        self._do_not_retransmit = False
 
     def get_route_type(self) -> int:
         """
@@ -457,3 +459,27 @@ class Packet:
                 signal below noise floor.
         """
         return self.get_snr()
+
+    def mark_do_not_retransmit(self) -> None:
+        """
+        Mark this packet to prevent retransmission.
+
+        Sets a flag indicating this packet should not be forwarded by repeaters.
+        This is typically set when a packet has been successfully delivered to
+        its intended destination to prevent unnecessary network traffic.
+
+        Used by destination nodes after successfully decrypting and processing
+        a message intended for them.
+        """
+        self._do_not_retransmit = True
+
+    def is_marked_do_not_retransmit(self) -> bool:
+        """
+        Check if this packet is marked to prevent retransmission.
+
+        Returns:
+            bool: True if the packet should not be retransmitted/forwarded.
+                This indicates the packet has reached its destination or should
+                remain local to the receiving node.
+        """
+        return self._do_not_retransmit
