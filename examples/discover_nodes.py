@@ -40,7 +40,7 @@ async def discover_nodes(
         radio_type: Radio hardware type ("waveshare", "uconsole", etc.)
         serial_port: Serial port for KISS TNC
         timeout: How long to wait for responses (seconds)
-        filter_mask: Node types to discover (CONTACT_TYPE_REPEATER = repeaters only)
+        filter_mask: Node types to discover (bitmask of ADV_TYPE values, e.g., ADV_TYPE_REPEATER = 2, so mask = 0x04 for repeaters)
     """
     mesh_node, identity = create_mesh_node("DiscoveryNode", radio_type, serial_port)
 
