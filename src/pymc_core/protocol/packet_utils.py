@@ -214,7 +214,8 @@ class PacketHashingUtils:
         sha = hashlib.sha256()
         sha.update(bytes([payload_type]))
         if payload_type == PAYLOAD_TYPE_TRACE:
-            sha.update(bytes([path_len]))
+            # MeshCore feeds the two-byte path_len field as-is for TRACE hashes
+            sha.update(struct.pack("<H", path_len & 0xFFFF))
         sha.update(payload)
         return sha.digest()[:MAX_HASH_SIZE]
 

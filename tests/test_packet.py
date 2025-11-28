@@ -1,4 +1,9 @@
+import hashlib
+import struct
+
 from pymc_core.protocol import Packet
+from pymc_core.protocol.constants import MAX_HASH_SIZE, PAYLOAD_TYPE_RESPONSE, PAYLOAD_TYPE_TRACE
+from pymc_core.protocol.packet_utils import PacketHashingUtils
 
 
 # Packet tests
@@ -28,3 +33,28 @@ def test_packet_validation():
 
     # Should validate successfully
     packet._validate_lengths()
+
+
+def test_trace_packet_hash_matches_meshcore_reference():
+    """TRACE packet hashes must include the two-byte path_len like MeshCore."""
+    payload = bytes(range(32))
+    path_len = 0x0102  # ensure both low/high bytes are exercised
+    expected = hashlib.sha256(
+        bytes([PAYLOAD_TYPE_TRACE]) + struct.pack("<H", path_len) + payload
+    ).digest()[:MAX_HASH_SIZE]
+
+    actual = PacketHashingUtils.calculate_packet_hash(PAYLOAD_TYPE_TRACE, path_len, payload)
+    assert actual == expected
+
+    expected_crc = int.from_bytes(expected[:4], "little")
+    assert PacketHashingUtils.calculate_crc(PAYLOAD_TYPE_TRACE, path_len, payload) == expected_crc
+
+
+def test_non_trace_packet_hash_skips_path_len():
+    """Non-TRACE packet hashes must not mix in path_len bytes."""
+    payload = b"payload"
+    path_len = 999  # should be ignored
+    expected = hashlib.sha256(bytes([PAYLOAD_TYPE_RESPONSE]) + payload).digest()[:MAX_HASH_SIZE]
+
+    actual = PacketHashingUtils.calculate_packet_hash(PAYLOAD_TYPE_RESPONSE, path_len, payload)
+    assert actual == expected
