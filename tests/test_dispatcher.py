@@ -230,6 +230,48 @@ class TestDispatcherPacketProcessing:
         assert mock_handler.call_count == 1
 
 
+class TestDispatcherFloodDelays:
+    @pytest.mark.asyncio
+    async def test_flood_packet_delay_applied(self, dispatcher, monkeypatch):
+        payload = b"delay_me"
+        packet_data = create_test_packet(PAYLOAD_TYPE_TXT_MSG, payload)
+
+        sleep_calls: list[float] = []
+
+        async def fake_sleep(delay: float):
+            sleep_calls.append(delay)
+
+        monkeypatch.setattr("asyncio.sleep", fake_sleep)
+
+        dispatcher._calculate_flood_delay_ms = Mock(return_value=(200, 0.6, 300.0))
+        dispatcher._dispatch = AsyncMock()
+
+        await dispatcher._process_received_packet(packet_data)
+
+        assert sleep_calls == [0.2]
+        dispatcher._dispatch.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_flood_packet_immediate_when_delay_low(self, dispatcher, monkeypatch):
+        payload = b"fast"
+        packet_data = create_test_packet(PAYLOAD_TYPE_TXT_MSG, payload)
+
+        sleep_calls: list[float] = []
+
+        async def fake_sleep(delay: float):
+            sleep_calls.append(delay)
+
+        monkeypatch.setattr("asyncio.sleep", fake_sleep)
+
+        dispatcher._calculate_flood_delay_ms = Mock(return_value=(10, 0.1, 150.0))
+        dispatcher._dispatch = AsyncMock()
+
+        await dispatcher._process_received_packet(packet_data)
+
+        assert sleep_calls == []
+        dispatcher._dispatch.assert_awaited_once()
+
+
 class TestDispatcherACKSystem:
     """Test ACK system functionality."""
 

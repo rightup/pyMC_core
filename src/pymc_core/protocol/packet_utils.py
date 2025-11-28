@@ -278,6 +278,15 @@ class PacketTimingUtils:
     CAD_FAIL_RETRY_DELAY_MS = 200  # Matches Dispatcher::getCADFailRetryDelay
     CAD_FAIL_MAX_DURATION_MS = 4000  # Matches Dispatcher::getCADFailMaxDuration
     MAX_RX_DELAY_MS = 32_000  # Dispatcher::MAX_RX_DELAY_MILLIS
+    DEFAULT_SPREADING_FACTOR = 10
+    SNR_THRESHOLDS = {
+        7: -7.5,
+        8: -10.0,
+        9: -12.5,
+        10: -15.0,
+        11: -17.5,
+        12: -20.0,
+    }
 
     @staticmethod
     def estimate_airtime_ms(packet_length_bytes: int, radio_config: dict = None) -> float:
@@ -421,3 +430,28 @@ class PacketTimingUtils:
         """Expose Dispatcher::getCADFailMaxDuration for CAD timeout modeling."""
 
         return PacketTimingUtils.CAD_FAIL_MAX_DURATION_MS
+
+    @staticmethod
+    def calculate_packet_score(
+        snr_db: float,
+        packet_len_bytes: int,
+        spreading_factor: Optional[int] = None,
+    ) -> float:
+        """Approximate mesh::Radio::packetScore from MeshCore RadioLib wrappers."""
+
+        sf = spreading_factor or PacketTimingUtils.DEFAULT_SPREADING_FACTOR
+        if sf < 7:
+            return 0.0
+
+        threshold = PacketTimingUtils.SNR_THRESHOLDS.get(sf, PacketTimingUtils.SNR_THRESHOLDS[10])
+        if snr_db < threshold:
+            return 0.0
+
+        success_rate = (snr_db - threshold) / 10.0
+        collision_penalty = 1.0 - min(max(packet_len_bytes / 256.0, 0.0), 1.0)
+        score = success_rate * collision_penalty
+        if score < 0.0:
+            return 0.0
+        if score > 1.0:
+            return 1.0
+        return score

@@ -5,7 +5,7 @@ import enum
 import logging
 from typing import Any, Awaitable, Callable, Optional
 
-from ..protocol import Packet
+from ..protocol import Packet, PacketTimingUtils
 from ..protocol.constants import (  # Payload types
     PAYLOAD_TYPE_ACK,
     PAYLOAD_TYPE_ADVERT,
@@ -56,10 +56,13 @@ class Dispatcher:
         tx_delay: float = 0.05,
         log_fn: Optional[Callable[[str], None]] = None,
         packet_filter: Optional[Any] = None,
+        radio_config: Optional[dict] = None,
     ) -> None:
         self.radio = radio
         self.tx_delay = tx_delay
         self.state: DispatcherState = DispatcherState.IDLE
+        self.radio_config: dict = dict(radio_config or {})
+        self._score_delay_threshold_ms = 50
 
         self.packet_received_callback: Optional[Callable[[Packet], Awaitable[None] | None]] = None
         self.packet_sent_callback: Optional[Callable[[Packet], Awaitable[None] | None]] = None
@@ -148,6 +151,8 @@ class Dispatcher:
         """Quick setup for all the standard packet handlers."""
         # Keep our identity handy for detecting our own packets
         self.local_identity = local_identity
+        if radio_config is not None:
+            self.radio_config = dict(radio_config)
 
         # Set up ACK handler with callback to us
         ack_handler = AckHandler(self._log, self)
@@ -346,8 +351,6 @@ class Dispatcher:
         # Let the node know about this packet for analysis (statistics, caching, etc.)
         if self.packet_analysis_callback:
             try:
-                import asyncio
-
                 if asyncio.iscoroutinefunction(self.packet_analysis_callback):
                     await self.packet_analysis_callback(pkt, data)
                 else:
@@ -372,9 +375,44 @@ class Dispatcher:
             self._log(f"Ignoring own packet (type={pkt.header >> 4:02X}) to prevent loops")
             return
 
+        if pkt.is_route_flood():
+            delay_ms, score, airtime_ms = self._calculate_flood_delay_ms(pkt)
+            if delay_ms >= self._score_delay_threshold_ms:
+                self._log(
+                    "[RX DEBUG] Flood packet delay: "
+                    f"{delay_ms}ms (score={score:.2f}, airtime={airtime_ms:.1f}ms)"
+                )
+                await asyncio.sleep(delay_ms / 1000.0)
+            else:
+                self._log(
+                    "[RX DEBUG] Flood score delay below threshold "
+                    f"({delay_ms}ms), processing immediately"
+                )
+
         # Handle ACK matching for waiting senders
         self._log("[RX DEBUG] Dispatching packet to handlers")
         await self._dispatch(pkt)
+
+    def _get_spreading_factor(self) -> Optional[int]:
+        if not self.radio_config:
+            return None
+        sf = self.radio_config.get("spreading_factor")
+        try:
+            return int(sf) if sf is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    def _calculate_flood_delay_ms(self, pkt: Packet) -> tuple[int, float, float]:
+        packet_len = pkt.get_raw_length()
+        airtime_ms = PacketTimingUtils.estimate_airtime_ms(packet_len, self.radio_config or None)
+        snr_db = pkt.snr if pkt.snr is not None else 0.0
+        score = PacketTimingUtils.calculate_packet_score(
+            snr_db,
+            packet_len,
+            self._get_spreading_factor(),
+        )
+        delay_ms = PacketTimingUtils.calc_rx_delay_ms(score, airtime_ms)
+        return delay_ms, score, airtime_ms
 
     # ------------------------------------------------------------------
     # Public interface - sending and receiving packets
