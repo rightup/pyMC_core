@@ -8,7 +8,7 @@ class TestPacketFilter:
         """Test packet filter initialization with default and custom window."""
         # Default window
         pf = PacketFilter()
-        assert pf.window_seconds == 30
+        assert pf.window_seconds == 45
         assert len(pf._packet_hashes) == 0
         assert len(pf._blacklist) == 0
 
@@ -152,3 +152,57 @@ class TestPacketFilter:
         pf_zero.track_packet("hash1")
         # With zero window, should not be considered duplicate immediately
         assert not pf_zero.is_duplicate("hash1")
+
+    def test_blacklist_expiration(self):
+        pf = PacketFilter(blacklist_duration=1)
+        packet_hash = "bad_hash"
+
+        pf.blacklist(packet_hash)
+        assert pf.is_blacklisted(packet_hash)
+
+        time.sleep(1.1)
+        assert not pf.is_blacklisted(packet_hash)
+
+    def test_tracked_packet_pool_is_bounded(self):
+        pf = PacketFilter(window_seconds=60, max_tracked_packets=2)
+
+        pf.track_packet("hash1")
+        pf.track_packet("hash2")
+        pf.track_packet("hash3")
+
+        assert "hash1" not in pf._packet_hashes
+        assert "hash2" in pf._packet_hashes
+        assert "hash3" in pf._packet_hashes
+
+    def test_blacklist_pool_is_bounded(self):
+        pf = PacketFilter(max_blacklist_size=2, blacklist_duration=60)
+
+        pf.blacklist("hash1")
+        pf.blacklist("hash2")
+        pf.blacklist("hash3")
+
+        assert "hash1" not in pf._blacklist
+        assert len(pf._blacklist) == 2
+
+    def test_delay_queue_helpers(self):
+        pf = PacketFilter()
+        packet_hash = "delayed"
+
+        pf.schedule_delay(packet_hash, delay_seconds=0.2)
+        assert pf.is_delay_active(packet_hash)
+
+        time.sleep(0.25)
+        assert not pf.is_delay_active(packet_hash)
+
+    def test_cleanup_prunes_all_structures(self):
+        pf = PacketFilter(window_seconds=1, blacklist_duration=1)
+        pf.track_packet("hash1")
+        pf.blacklist("hash2")
+        pf.schedule_delay("hash3", delay_seconds=0.5)
+
+        time.sleep(1.1)
+        pf.cleanup_old_hashes()
+
+        assert len(pf._packet_hashes) == 0
+        assert len(pf._blacklist) == 0
+        assert len(pf._delayed_packets) == 0
