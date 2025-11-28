@@ -2,7 +2,13 @@ import hashlib
 import struct
 
 from pymc_core.protocol import Packet
-from pymc_core.protocol.constants import MAX_HASH_SIZE, PAYLOAD_TYPE_RESPONSE, PAYLOAD_TYPE_TRACE
+from pymc_core.protocol.constants import (
+    MAX_HASH_SIZE,
+    PAYLOAD_TYPE_RESPONSE,
+    PAYLOAD_TYPE_TRACE,
+    ROUTE_TYPE_FLOOD,
+    ROUTE_TYPE_TRANSPORT_FLOOD,
+)
 from pymc_core.protocol.packet_utils import PacketHashingUtils
 
 
@@ -58,3 +64,60 @@ def test_non_trace_packet_hash_skips_path_len():
 
     actual = PacketHashingUtils.calculate_packet_hash(PAYLOAD_TYPE_RESPONSE, path_len, payload)
     assert actual == expected
+
+
+def test_transport_packet_round_trip_serialization():
+    """Transport packets must encode/decode transport codes in little-endian order."""
+    packet = Packet()
+    packet.header = ROUTE_TYPE_TRANSPORT_FLOOD  # payload/ver bits left as zero
+    packet.transport_codes = [0x1234, 0xBEEF]
+    packet.path = bytearray(b"\xAA\xBB")
+    packet.path_len = len(packet.path)
+    packet.payload = bytearray(b"\x01\x02\x03")
+    packet.payload_len = len(packet.payload)
+
+    serialized = packet.write_to()
+    expected_prefix = bytes([
+        ROUTE_TYPE_TRANSPORT_FLOOD,
+        0x34,
+        0x12,
+        0xEF,
+        0xBE,
+        packet.path_len,
+    ])
+    assert serialized.startswith(expected_prefix)
+
+    decoded = Packet()
+    assert decoded.read_from(serialized)
+    assert decoded.transport_codes == [0x1234, 0xBEEF]
+    assert decoded.path == packet.path
+    assert decoded.payload == packet.payload
+
+
+def test_non_transport_packet_round_trip_zeroes_transport_codes():
+    """Packets without transport routes must not emit leftover transport codes."""
+    packet = Packet()
+    packet.header = ROUTE_TYPE_FLOOD
+    packet.transport_codes = [0xFFFF, 0xABCD]  # should be ignored when serialized
+    packet.path = bytearray(b"\xCC")
+    packet.path_len = len(packet.path)
+    packet.payload = bytearray(b"\x99")
+    packet.payload_len = len(packet.payload)
+
+    serialized = packet.write_to()
+    assert serialized == bytes([ROUTE_TYPE_FLOOD, packet.path_len, *packet.path, *packet.payload])
+
+    decoded = Packet()
+    assert decoded.read_from(serialized)
+    assert decoded.transport_codes == [0, 0]
+
+
+def test_mark_do_not_retransmit_matches_meshcore_header_sentinel():
+    """Marking a packet for no retransmission must clobber the header to 0xFF like MeshCore."""
+    packet = Packet()
+    packet.header = ROUTE_TYPE_FLOOD
+    assert not packet.is_marked_do_not_retransmit()
+
+    packet.mark_do_not_retransmit()
+    assert packet.header == 0xFF
+    assert packet.is_marked_do_not_retransmit()
