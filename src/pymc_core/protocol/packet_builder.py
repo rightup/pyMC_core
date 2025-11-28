@@ -310,7 +310,7 @@ class PacketBuilder:
                 f"advert appdata too large: {len(appdata)} bytes (max {MAX_ADVERT_DATA_SIZE})"
             )
 
-        # Sign the first part of the payload (pubkey + timestamp + first 32 bytes of appdata)
+        # Sign the payload (pubkey + timestamp + appdata)
         body_to_sign = pubkey + ts_bytes + appdata
         signature = local_identity.sign(body_to_sign)
 
