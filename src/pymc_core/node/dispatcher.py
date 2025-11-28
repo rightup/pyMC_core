@@ -63,6 +63,7 @@ class Dispatcher:
         self.state: DispatcherState = DispatcherState.IDLE
         self.radio_config: dict = dict(radio_config or {})
         self._score_delay_threshold_ms = 50
+        self._next_tx_allowed_at: float = 0.0
 
         self.packet_received_callback: Optional[Callable[[Packet], Awaitable[None] | None]] = None
         self.packet_sent_callback: Optional[Callable[[Packet], Awaitable[None] | None]] = None
@@ -414,6 +415,71 @@ class Dispatcher:
         delay_ms = PacketTimingUtils.calc_rx_delay_ms(score, airtime_ms)
         return delay_ms, score, airtime_ms
 
+    def _estimate_packet_airtime_ms(self, packet: Packet) -> float:
+        return PacketTimingUtils.estimate_airtime_ms(packet.get_raw_length(), self.radio_config or None)
+
+    async def _await_tx_budget_window(self) -> None:
+        if self._next_tx_allowed_at <= 0:
+            return
+        now = asyncio.get_event_loop().time()
+        delay = self._next_tx_allowed_at - now
+        if delay > 0:
+            self._log(f"[TX DEBUG] Airtime budget wait {delay * 1000:.0f}ms")
+            await asyncio.sleep(delay)
+
+    def _schedule_next_tx_window(self, packet_airtime_ms: float) -> None:
+        delay_ms = PacketTimingUtils.calc_airtime_budget_delay_ms(packet_airtime_ms)
+        if delay_ms <= 0:
+            self._next_tx_allowed_at = 0.0
+            return
+        now = asyncio.get_event_loop().time()
+        self._next_tx_allowed_at = now + (delay_ms / 1000.0)
+        self._log(f"[TX DEBUG] Next TX allowed in {delay_ms:.0f}ms")
+
+    async def _ensure_channel_clear(self) -> None:
+        cad_method = getattr(self.radio, "perform_cad", None)
+        if not callable(cad_method):
+            return
+
+        retry_delay = PacketTimingUtils.get_cad_fail_retry_delay_ms() / 1000.0
+        max_duration = PacketTimingUtils.get_cad_fail_max_duration_ms() / 1000.0
+        start = asyncio.get_event_loop().time()
+        attempt = 0
+
+        while True:
+            attempt += 1
+            try:
+                cad_result = await cad_method()
+            except Exception as exc:
+                self._log(f"[TX DEBUG] CAD attempt {attempt} failed: {exc}; continuing with TX")
+                return
+
+            if isinstance(cad_result, dict):
+                channel_busy = bool(
+                    cad_result.get("detected")
+                    or cad_result.get("cad_detected")
+                    or cad_result.get("activity")
+                )
+            else:
+                channel_busy = bool(cad_result)
+
+            if not channel_busy:
+                if attempt > 1:
+                    self._log(f"[TX DEBUG] CAD cleared after {attempt} attempts")
+                return
+
+            elapsed = asyncio.get_event_loop().time() - start
+            remaining = max_duration - elapsed
+            if remaining <= 0:
+                self._log("[TX DEBUG] CAD busy window exceeded, forcing transmit")
+                return
+
+            backoff = min(retry_delay, remaining)
+            self._log(
+                f"[TX DEBUG] CAD detected activity (attempt {attempt}), backing off {backoff * 1000:.0f}ms"
+            )
+            await asyncio.sleep(backoff)
+
     # ------------------------------------------------------------------
     # Public interface - sending and receiving packets
     # ------------------------------------------------------------------
@@ -442,6 +508,16 @@ class Dispatcher:
             self._log("Busy, skipping TX.")
             return False
 
+        packet_airtime_ms = self._estimate_packet_airtime_ms(packet)
+
+        self.state = DispatcherState.WAIT
+        try:
+            await self._await_tx_budget_window()
+            await self._ensure_channel_clear()
+        except Exception:
+            self.state = DispatcherState.IDLE
+            raise
+
         # ------------------------------------------------------------------ #
         #  Send the packet
         # ------------------------------------------------------------------ #
@@ -453,6 +529,8 @@ class Dispatcher:
             self._log(f"Radio transmit error: {e}")
             self.state = DispatcherState.IDLE
             return False
+
+        self._schedule_next_tx_window(packet_airtime_ms)
         # Log what we sent
         type_name = PAYLOAD_TYPES.get(payload_type, f"UNKNOWN_{payload_type}")
         route_name = ROUTE_TYPES.get(packet.get_route_type(), f"UNKNOWN_{packet.get_route_type()}")
