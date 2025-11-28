@@ -3,6 +3,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 # from pymc_core.node.events import MeshEvents  # Not currently used
+from pymc_core.node.contact_book import ContactBook
 from pymc_core.node.handlers import (
     AckHandler,
     AdvertHandler,
@@ -172,6 +173,90 @@ class TestTextMessageHandler:
 
         # Should return early without processing
         self.log_fn.assert_called()
+
+class TestTextHandlerACL:
+    @pytest.mark.asyncio
+    async def test_cli_command_blocked_without_permission(self, monkeypatch):
+        local_identity = LocalIdentity()
+        contacts = ContactBook()
+        peer = LocalIdentity()
+        record = contacts.add_contact(
+            {
+                "public_key": peer.get_public_key().hex(),
+                "name": "peer",
+                "type": 1,
+            }
+        )
+        contacts.set_permissions(record.public_key, allow_cli=False)
+
+        log_fn = MagicMock()
+        send_packet = AsyncMock()
+        handler = TextMessageHandler(local_identity, contacts, log_fn, send_packet, None)
+
+        dest_hash = local_identity.get_public_key()[0]
+        src_hash = record.src_hash()
+        packet = Packet()
+        packet.payload = bytearray([dest_hash, src_hash]) + bytearray(b"\x00" * 16)
+        packet.payload_len = len(packet.payload)
+        packet.header = 0
+
+        plaintext = (1234).to_bytes(4, "little") + bytes([0x01]) + b"reboot"
+        monkeypatch.setattr(
+            "pymc_core.node.handlers.text.CryptoUtils.mac_then_decrypt",
+            lambda *args, **kwargs: plaintext,
+        )
+
+        await handler(packet)
+
+        send_packet.assert_not_called()
+        log_fn.assert_called()
+
+
+class TestProtocolResponseACL:
+    @pytest.mark.asyncio
+    async def test_telemetry_blocked_when_not_allowed(self, monkeypatch):
+        contacts = ContactBook()
+        local_identity = LocalIdentity()
+        peer = LocalIdentity()
+        record = contacts.add_contact(
+            {
+                "public_key": peer.get_public_key().hex(),
+                "name": "peer",
+                "type": 1,
+            }
+        )
+        contacts.set_permissions(record.public_key, allow_telemetry=False)
+
+        log_fn = MagicMock()
+        handler = ProtocolResponseHandler(log_fn, local_identity, contacts)
+
+        captured = []
+
+        def callback(success, text, parsed):
+            captured.append((success, text, parsed))
+
+        src_hash = record.src_hash()
+        handler.set_response_callback(src_hash, callback)
+
+        packet = Packet()
+        dest_hash = local_identity.get_public_key()[0]
+        packet.payload = bytearray([dest_hash, src_hash]) + bytearray(b"\x00" * 8)
+        packet.payload_len = len(packet.payload)
+        packet.header = (PAYLOAD_TYPE_PATH << 2)
+
+        plaintext = (4321).to_bytes(4, "little") + b"\x01\x02\x03"
+        monkeypatch.setattr(
+            "pymc_core.node.handlers.protocol_response.CryptoUtils.mac_then_decrypt",
+            lambda *args, **kwargs: plaintext,
+        )
+
+        await handler(packet)
+
+        assert captured, "Expected callback to be invoked"
+        success, text, parsed = captured[0]
+        assert success is False
+        assert text == "Telemetry blocked by ACL"
+        assert parsed == {"type": "telemetry", "acl_blocked": True}
 
 
 # Advert Handler Tests

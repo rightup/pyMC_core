@@ -74,6 +74,17 @@ class TextMessageHandler(BaseHandler):
         pubkey = bytes.fromhex(matched_contact.public_key)
         timestamp_int = int.from_bytes(timestamp, "little")
 
+        if flags == 0x01:
+            can_cli = True
+            permission_fn = getattr(self.contacts, "can_execute_cli", None)
+            if callable(permission_fn):
+                can_cli = permission_fn(matched_contact)
+            if not can_cli:
+                self.log(
+                    f"CLI command from '{matched_contact.name}' blocked by ACL"
+                )
+                return
+
         # Determine message routing type from packet header
         route_type = packet.header & 0x03  # Route type is in bits 0-1
         is_flood = route_type == 1  # ROUTE_TYPE_FLOOD = 1
