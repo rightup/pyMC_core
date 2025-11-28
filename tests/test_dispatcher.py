@@ -230,6 +230,47 @@ class TestDispatcherPacketProcessing:
         assert mock_handler.call_count == 1
 
 
+class TestDispatcherOwnPacketDetection:
+    @pytest.mark.asyncio
+    async def test_is_own_packet_detects_recent_crc(self, dispatcher):
+        payload = b"loopback"
+        packet_data = create_test_packet(PAYLOAD_TYPE_TXT_MSG, payload)
+        pkt = Packet()
+        pkt.read_from(packet_data)
+
+        dispatcher._record_outbound_packet_crc(pkt.get_crc())
+
+        assert dispatcher._is_own_packet(pkt) is True
+
+    @pytest.mark.asyncio
+    async def test_is_own_packet_requires_tracked_crc(self, dispatcher):
+        payload = bytearray(b"hash_collision")
+        if len(payload) < 2:
+            payload.extend(b"\x00" * (2 - len(payload)))
+        packet_data = create_test_packet(PAYLOAD_TYPE_TXT_MSG, bytes(payload))
+        pkt = Packet()
+        pkt.read_from(packet_data)
+
+        # Force src hash byte to match local identity to simulate collision
+        pkt.payload[1] = dispatcher.local_identity.get_public_key()[0]
+
+        assert dispatcher._is_own_packet(pkt) is False
+
+    @pytest.mark.asyncio
+    async def test_recent_crc_tracking_expires(self, dispatcher):
+        payload = b"expire_me"
+        packet_data = create_test_packet(PAYLOAD_TYPE_TXT_MSG, payload)
+        pkt = Packet()
+        pkt.read_from(packet_data)
+
+        dispatcher._own_packet_cache_ttl = 0.05
+        dispatcher._record_outbound_packet_crc(pkt.get_crc())
+
+        await asyncio.sleep(0.1)
+
+        assert dispatcher._is_own_packet(pkt) is False
+
+
 class TestDispatcherFloodDelays:
     @pytest.mark.asyncio
     async def test_flood_packet_delay_applied(self, dispatcher, monkeypatch):

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import enum
 import logging
+import time
 from typing import Any, Awaitable, Callable, Optional
 
 from ..protocol import Packet, PacketTimingUtils
@@ -28,6 +29,8 @@ from .handlers import (
 )
 
 ACK_TIMEOUT = 5.0  # seconds to wait for an ACK
+OWN_PACKET_CACHE_TTL = 180.0  # seconds to keep outbound packet hashes
+OWN_PACKET_CACHE_MAX = 2048  # max outbound packet hashes to track
 
 
 class DispatcherState(str, enum.Enum):
@@ -64,6 +67,9 @@ class Dispatcher:
         self.radio_config: dict = dict(radio_config or {})
         self._score_delay_threshold_ms = 50
         self._next_tx_allowed_at: float = 0.0
+        self._recent_tx_packets: dict[int, float] = {}
+        self._own_packet_cache_ttl = OWN_PACKET_CACHE_TTL
+        self._own_packet_cache_max = OWN_PACKET_CACHE_MAX
 
         self.packet_received_callback: Optional[Callable[[Packet], Awaitable[None] | None]] = None
         self.packet_sent_callback: Optional[Callable[[Packet], Awaitable[None] | None]] = None
@@ -265,22 +271,17 @@ class Dispatcher:
         return self._handlers.get(ptype, self._fallback_handler)
 
     def _is_own_packet(self, pkt: Packet) -> bool:
-        """Check if this packet came from us by comparing the source hash."""
-        if not self.local_identity or len(pkt.payload) < 2:
+        """Detect our own packets by matching recently transmitted CRCs."""
+
+        if not self.local_identity:
             return False
 
-        # Get our public key hash (first byte)
-        our_pubkey = self.local_identity.get_public_key()
-        our_hash = our_pubkey[0] if len(our_pubkey) > 0 else 0
+        crc = pkt.get_crc()
+        if self._is_recent_outbound_crc(crc):
+            self._log(f"Own packet detected via CRC {crc:08X}")
+            return True
 
-        # Compare with src_hash in payload[1]
-        src_hash = pkt.payload[1]
-        is_own = src_hash == our_hash
-
-        if is_own:
-            self._log(f"Own packet detected: src_hash={src_hash:02X}, our_hash={our_hash:02X}")
-
-        return is_own
+        return False
 
     def set_packet_received_callback(
         self, callback: Callable[[Packet], Awaitable[None] | None]
@@ -480,6 +481,41 @@ class Dispatcher:
             )
             await asyncio.sleep(backoff)
 
+    def _record_outbound_packet_crc(self, crc: int | None) -> None:
+        if crc is None:
+            return
+        now = time.monotonic()
+        self._recent_tx_packets[crc] = now
+        self._prune_recent_outbound(now)
+
+    def _is_recent_outbound_crc(self, crc: int | None) -> bool:
+        if crc is None:
+            return False
+        now = time.monotonic()
+        self._prune_recent_outbound(now)
+        ts = self._recent_tx_packets.get(crc)
+        if ts is None:
+            return False
+        if now - ts > self._own_packet_cache_ttl:
+            self._recent_tx_packets.pop(crc, None)
+            return False
+        return True
+
+    def _prune_recent_outbound(self, now: float) -> None:
+        ttl = self._own_packet_cache_ttl
+        expired = [crc for crc, ts in self._recent_tx_packets.items() if now - ts > ttl]
+        for crc in expired:
+            self._recent_tx_packets.pop(crc, None)
+
+        if len(self._recent_tx_packets) <= self._own_packet_cache_max:
+            return
+
+        # Drop oldest entries until within cap to bound memory usage
+        for crc, _ in sorted(self._recent_tx_packets.items(), key=lambda item: item[1]):
+            self._recent_tx_packets.pop(crc, None)
+            if len(self._recent_tx_packets) <= self._own_packet_cache_max:
+                break
+
     # ------------------------------------------------------------------
     # Public interface - sending and receiving packets
     # ------------------------------------------------------------------
@@ -500,6 +536,7 @@ class Dispatcher:
                 If None, will be calculated from packet.
         """
         payload_type = packet.header >> PH_TYPE_SHIFT
+        packet_crc = packet.get_crc()
 
         # ------------------------------------------------------------------ #
         #  Make sure we're not already busy
@@ -530,6 +567,7 @@ class Dispatcher:
             self.state = DispatcherState.IDLE
             return False
 
+        self._record_outbound_packet_crc(packet_crc)
         self._schedule_next_tx_window(packet_airtime_ms)
         # Log what we sent
         type_name = PAYLOAD_TYPES.get(payload_type, f"UNKNOWN_{payload_type}")
@@ -554,7 +592,7 @@ class Dispatcher:
         if expected_crc is not None:
             self._current_expected_crc = expected_crc
         else:
-            self._current_expected_crc = packet.get_crc()
+            self._current_expected_crc = packet_crc
 
         self._log(
             f"Waiting for ACK with CRC {self._current_expected_crc:08X} (timeout: {ACK_TIMEOUT}s)"
