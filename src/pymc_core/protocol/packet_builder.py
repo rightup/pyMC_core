@@ -12,6 +12,7 @@ from .constants import (
     ADVERT_FLAG_HAS_NAME,
     ADVERT_FLAG_IS_CHAT_NODE,
     CIPHER_BLOCK_SIZE,
+    MAX_ADVERT_DATA_SIZE,
     CONTACT_TYPE_ROOM_SERVER,
     MAX_PACKET_PAYLOAD,
     MAX_PATH_SIZE,
@@ -304,9 +305,13 @@ class PacketBuilder:
         pubkey = local_identity.get_public_key()
         ts_bytes = struct.pack("<I", timestamp)
         appdata = PacketBuilder._encode_advert_data(name, lat, lon, feature1, feature2, flags)
+        if len(appdata) > MAX_ADVERT_DATA_SIZE:
+            raise ValueError(
+                f"advert appdata too large: {len(appdata)} bytes (max {MAX_ADVERT_DATA_SIZE})"
+            )
 
         # Sign the first part of the payload (pubkey + timestamp + first 32 bytes of appdata)
-        body_to_sign = pubkey + ts_bytes + appdata[:32]
+        body_to_sign = pubkey + ts_bytes + appdata
         signature = local_identity.sign(body_to_sign)
 
         # Create payload: pubkey + timestamp + signature + appdata
