@@ -72,7 +72,13 @@ from .packet_utils import (
     PacketValidationUtils,
     RouteTypeUtils,
 )
-from .transport_keys import calc_transport_code, get_auto_key_for
+from .transport_keys import (
+    TransportKey,
+    TransportKeyStore,
+    calc_transport_code,
+    derive_auto_key,
+    get_auto_key_for,
+)
 from .utils import decode_appdata, parse_advert_payload
 
 __all__ = [
