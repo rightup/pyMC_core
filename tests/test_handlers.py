@@ -26,10 +26,12 @@ from pymc_core.protocol.constants import (
     PAYLOAD_TYPE_ANON_REQ,
     PAYLOAD_TYPE_CONTROL,
     PAYLOAD_TYPE_GRP_TXT,
+    PAYLOAD_TYPE_MULTIPART,
     PAYLOAD_TYPE_PATH,
     PAYLOAD_TYPE_RESPONSE,
     PAYLOAD_TYPE_TRACE,
     PAYLOAD_TYPE_TXT_MSG,
+    PH_TYPE_SHIFT,
     PUB_KEY_SIZE,
     SIGNATURE_SIZE,
     TIMESTAMP_SIZE,
@@ -125,6 +127,31 @@ class TestAckHandler:
         # Create packet with 4-byte CRC payload
         packet = Packet()
         packet.payload = bytearray(b"\x78\x56\x34\x12")  # CRC 0x12345678
+
+        callback = MagicMock()
+        self.handler.set_ack_received_callback(callback)
+
+        await self.handler(packet)
+
+        callback.assert_called_once_with(0x12345678)
+
+    @pytest.mark.asyncio
+    async def test_process_multipart_ack_valid(self):
+        """Test decoding of multipart ACK payloads."""
+        packet = Packet()
+        packet.payload = bytearray(b"\x13\x78\x56\x34\x12")
+        packet.payload_len = len(packet.payload)
+
+        crc = await self.handler.process_multipart_ack(packet)
+        assert crc == 0x12345678
+
+    @pytest.mark.asyncio
+    async def test_call_multipart_ack(self):
+        """Ensure multipart ACK packets trigger dispatcher callback."""
+        packet = Packet()
+        packet.payload = bytearray(b"\x13\x78\x56\x34\x12")
+        packet.payload_len = len(packet.payload)
+        packet.header = PAYLOAD_TYPE_MULTIPART << PH_TYPE_SHIFT
 
         callback = MagicMock()
         self.handler.set_ack_received_callback(callback)

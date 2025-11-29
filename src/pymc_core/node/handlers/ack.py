@@ -1,17 +1,12 @@
 from typing import Callable, Optional
 
 from ...protocol import Packet
-from ...protocol.constants import PAYLOAD_TYPE_ACK
+from ...protocol.constants import PAYLOAD_TYPE_ACK, PAYLOAD_TYPE_MULTIPART
 from .base import BaseHandler
 
 
 class AckHandler(BaseHandler):
-    """
-    ACK handler that processes all ACK variants:
-    1. Discrete ACK packets (payload type 1)
-    2. Bundled ACKs in PATH packets
-    3. Encrypted ACK responses (20-byte PATH packets)
-    """
+    """Process discrete, multipart, and path-embedded ACK packets."""
 
     @staticmethod
     def payload_type() -> int:
@@ -31,23 +26,62 @@ class AckHandler(BaseHandler):
         self.dispatcher = dispatcher
 
     async def __call__(self, packet: Packet) -> None:
-        """Handle discrete ACK packets (payload type 1)."""
-        ack_crc = await self.process_discrete_ack(packet)
+        """Handle all ACK packets, including multipart variants."""
+        payload_type = packet.get_payload_type()
+
+        if payload_type == PAYLOAD_TYPE_MULTIPART:
+            ack_crc = await self.process_multipart_ack(packet)
+        else:
+            ack_crc = await self.process_discrete_ack(packet)
+
         if ack_crc is not None:
             await self._notify_ack_received(ack_crc)
 
     async def process_discrete_ack(self, packet: Packet) -> Optional[int]:
         """Process a discrete ACK packet and return the CRC if valid."""
-        self.log(f"Processing discrete ACK: payload_len={len(packet.payload)}")
-        self.log(f"ACK payload (hex): {packet.payload.hex().upper()}")
+        payload_len = packet.payload_len or len(packet.payload)
+        payload = bytes(packet.payload[:payload_len])
 
-        if len(packet.payload) != 4:
-            self.log(f"Invalid ACK length: {len(packet.payload)} bytes (expected 4)")
+        self.log(f"Processing discrete ACK: payload_len={payload_len}")
+        self.log(f"ACK payload (hex): {payload.hex().upper()}")
+
+        if payload_len != 4:
+            self.log(f"Invalid ACK length: {payload_len} bytes (expected 4)")
             return None
 
-        # Extract CRC checksum (4 bytes, little endian per protocol spec)
-        crc = int.from_bytes(packet.payload, "little")
+        crc = int.from_bytes(payload, "little")
         self.log(f"Discrete ACK received: CRC={crc:08X}")
+        return crc
+
+    async def process_multipart_ack(self, packet: Packet) -> Optional[int]:
+        """Process multipart ACK packets (PAYLOAD_TYPE_MULTIPART)."""
+        payload_len = packet.payload_len or len(packet.payload)
+        payload = bytes(packet.payload[:payload_len])
+
+        if not payload:
+            self.log("Multipart ACK missing payload")
+            return None
+
+        multi_header = payload[0]
+        remaining = multi_header >> 4
+        inner_type = multi_header & 0x0F
+        self.log(
+            f"Processing multipart ACK: remaining={remaining}, inner_type=0x{inner_type:02X}, total_len={payload_len}"
+        )
+
+        if inner_type != PAYLOAD_TYPE_ACK:
+            self.log("Multipart packet inner type is not ACK; ignoring")
+            return None
+
+        ack_payload = payload[1:]
+        if len(ack_payload) < 4:
+            self.log(
+                f"Multipart ACK payload too short: {len(ack_payload)} bytes (expected >= 4)"
+            )
+            return None
+
+        crc = int.from_bytes(ack_payload[:4], "little")
+        self.log(f"Multipart ACK decoded: CRC={crc:08X} (remaining={remaining})")
         return crc
 
     async def process_path_ack_variants(self, packet: Packet) -> Optional[int]:

@@ -10,6 +10,7 @@ from ..protocol import Packet, PacketTimingUtils
 from ..protocol.constants import (  # Payload types
     PAYLOAD_TYPE_ACK,
     PAYLOAD_TYPE_ADVERT,
+    PAYLOAD_TYPE_MULTIPART,
     PH_TYPE_SHIFT,
 )
 from ..protocol.utils import PAYLOAD_TYPES, ROUTE_TYPES, format_packet_info
@@ -171,6 +172,7 @@ class Dispatcher:
             AdvertHandler(contacts, self._log, local_identity, event_service),
         )
         self.register_handler(AckHandler.payload_type(), ack_handler)
+        self.register_handler(PAYLOAD_TYPE_MULTIPART, ack_handler)
 
         # Text message handler - needs to send ACKs back through us
         text_message_handler = TextMessageHandler(
