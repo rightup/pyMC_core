@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 
 from pymc_core.node.dispatcher import Dispatcher, DispatcherState
-from pymc_core.protocol import Packet
+from pymc_core.protocol import Packet, PacketTimingUtils
 from pymc_core.protocol.constants import PAYLOAD_TYPE_ACK, PAYLOAD_TYPE_ADVERT, PAYLOAD_TYPE_TXT_MSG
 from pymc_core.protocol.packet_filter import PacketFilter
 
@@ -230,6 +230,89 @@ class TestDispatcherPacketProcessing:
         assert mock_handler.call_count == 1
 
 
+class TestDispatcherOwnPacketDetection:
+    @pytest.mark.asyncio
+    async def test_is_own_packet_detects_recent_crc(self, dispatcher):
+        payload = b"loopback"
+        packet_data = create_test_packet(PAYLOAD_TYPE_TXT_MSG, payload)
+        pkt = Packet()
+        pkt.read_from(packet_data)
+
+        dispatcher._record_outbound_packet_crc(pkt.get_crc())
+
+        assert dispatcher._is_own_packet(pkt) is True
+
+    @pytest.mark.asyncio
+    async def test_is_own_packet_requires_tracked_crc(self, dispatcher):
+        payload = bytearray(b"hash_collision")
+        if len(payload) < 2:
+            payload.extend(b"\x00" * (2 - len(payload)))
+        packet_data = create_test_packet(PAYLOAD_TYPE_TXT_MSG, bytes(payload))
+        pkt = Packet()
+        pkt.read_from(packet_data)
+
+        # Force src hash byte to match local identity to simulate collision
+        pkt.payload[1] = dispatcher.local_identity.get_public_key()[0]
+
+        assert dispatcher._is_own_packet(pkt) is False
+
+    @pytest.mark.asyncio
+    async def test_recent_crc_tracking_expires(self, dispatcher):
+        payload = b"expire_me"
+        packet_data = create_test_packet(PAYLOAD_TYPE_TXT_MSG, payload)
+        pkt = Packet()
+        pkt.read_from(packet_data)
+
+        dispatcher._own_packet_cache_ttl = 0.05
+        dispatcher._record_outbound_packet_crc(pkt.get_crc())
+
+        await asyncio.sleep(0.1)
+
+        assert dispatcher._is_own_packet(pkt) is False
+
+
+class TestDispatcherFloodDelays:
+    @pytest.mark.asyncio
+    async def test_flood_packet_delay_applied(self, dispatcher, monkeypatch):
+        payload = b"delay_me"
+        packet_data = create_test_packet(PAYLOAD_TYPE_TXT_MSG, payload)
+
+        sleep_calls: list[float] = []
+
+        async def fake_sleep(delay: float):
+            sleep_calls.append(delay)
+
+        monkeypatch.setattr("asyncio.sleep", fake_sleep)
+
+        dispatcher._calculate_flood_delay_ms = Mock(return_value=(200, 0.6, 300.0))
+        dispatcher._dispatch = AsyncMock()
+
+        await dispatcher._process_received_packet(packet_data)
+
+        assert sleep_calls == [0.2]
+        dispatcher._dispatch.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_flood_packet_immediate_when_delay_low(self, dispatcher, monkeypatch):
+        payload = b"fast"
+        packet_data = create_test_packet(PAYLOAD_TYPE_TXT_MSG, payload)
+
+        sleep_calls: list[float] = []
+
+        async def fake_sleep(delay: float):
+            sleep_calls.append(delay)
+
+        monkeypatch.setattr("asyncio.sleep", fake_sleep)
+
+        dispatcher._calculate_flood_delay_ms = Mock(return_value=(10, 0.1, 150.0))
+        dispatcher._dispatch = AsyncMock()
+
+        await dispatcher._process_received_packet(packet_data)
+
+        assert sleep_calls == []
+        dispatcher._dispatch.assert_awaited_once()
+
+
 class TestDispatcherACKSystem:
     """Test ACK system functionality."""
 
@@ -399,6 +482,70 @@ class TestDispatcherSendPacket:
         result = await dispatcher.send_packet(packet)
 
         assert result is True
+
+    @pytest.mark.asyncio
+    async def test_send_packet_waits_for_airtime_budget(self, dispatcher, monkeypatch):
+        packet = Packet()
+        packet.header = (0 << 6) | (PAYLOAD_TYPE_TXT_MSG << 2)
+        packet.payload = bytearray(b"budget")
+        packet.payload_len = len(packet.payload)
+        packet.path_len = 0
+
+        dispatcher.radio.send = AsyncMock(return_value=True)
+
+        sleep_calls: list[float] = []
+
+        async def fake_sleep(delay: float):
+            sleep_calls.append(delay)
+
+        dispatcher._next_tx_allowed_at = asyncio.get_event_loop().time() + 0.1
+
+        monkeypatch.setattr("asyncio.sleep", fake_sleep)
+        monkeypatch.setattr(
+            "pymc_core.node.dispatcher.PacketTimingUtils.estimate_airtime_ms",
+            Mock(return_value=120.0),
+        )
+        monkeypatch.setattr(
+            "pymc_core.node.dispatcher.PacketTimingUtils.calc_airtime_budget_delay_ms",
+            Mock(return_value=400.0),
+        )
+
+        await dispatcher.send_packet(packet, wait_for_ack=False)
+
+        assert sleep_calls and pytest.approx(sleep_calls[0], rel=1e-3) == 0.1
+        assert dispatcher._next_tx_allowed_at >= asyncio.get_event_loop().time()
+
+    @pytest.mark.asyncio
+    async def test_send_packet_retries_cad_until_clear(self, dispatcher, monkeypatch):
+        packet = Packet()
+        packet.header = (0 << 6) | (PAYLOAD_TYPE_TXT_MSG << 2)
+        packet.payload = bytearray(b"cad")
+        packet.payload_len = len(packet.payload)
+        packet.path_len = 0
+
+        dispatcher.radio.send = AsyncMock(return_value=True)
+        dispatcher.radio.perform_cad = AsyncMock(side_effect=[True, True, False])
+
+        sleep_calls: list[float] = []
+
+        async def fake_sleep(delay: float):
+            sleep_calls.append(delay)
+
+        monkeypatch.setattr("asyncio.sleep", fake_sleep)
+        monkeypatch.setattr(
+            "pymc_core.node.dispatcher.PacketTimingUtils.estimate_airtime_ms",
+            Mock(return_value=80.0),
+        )
+        monkeypatch.setattr(
+            "pymc_core.node.dispatcher.PacketTimingUtils.calc_airtime_budget_delay_ms",
+            Mock(return_value=200.0),
+        )
+
+        await dispatcher.send_packet(packet, wait_for_ack=False)
+
+        assert dispatcher.radio.perform_cad.await_count == 3
+        expected_delay = PacketTimingUtils.get_cad_fail_retry_delay_ms() / 1000.0
+        assert sleep_calls == [expected_delay, expected_delay]
 
     def test_own_packet_detection(self, dispatcher):
         """Test detection of own packets."""

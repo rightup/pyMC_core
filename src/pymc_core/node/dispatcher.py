@@ -3,12 +3,14 @@ from __future__ import annotations
 import asyncio
 import enum
 import logging
+import time
 from typing import Any, Awaitable, Callable, Optional
 
-from ..protocol import Packet
+from ..protocol import Packet, PacketTimingUtils
 from ..protocol.constants import (  # Payload types
     PAYLOAD_TYPE_ACK,
     PAYLOAD_TYPE_ADVERT,
+    PAYLOAD_TYPE_MULTIPART,
     PH_TYPE_SHIFT,
 )
 from ..protocol.utils import PAYLOAD_TYPES, ROUTE_TYPES, format_packet_info
@@ -28,6 +30,8 @@ from .handlers import (
 )
 
 ACK_TIMEOUT = 5.0  # seconds to wait for an ACK
+OWN_PACKET_CACHE_TTL = 180.0  # seconds to keep outbound packet hashes
+OWN_PACKET_CACHE_MAX = 2048  # max outbound packet hashes to track
 
 
 class DispatcherState(str, enum.Enum):
@@ -56,10 +60,17 @@ class Dispatcher:
         tx_delay: float = 0.05,
         log_fn: Optional[Callable[[str], None]] = None,
         packet_filter: Optional[Any] = None,
+        radio_config: Optional[dict] = None,
     ) -> None:
         self.radio = radio
         self.tx_delay = tx_delay
         self.state: DispatcherState = DispatcherState.IDLE
+        self.radio_config: dict = dict(radio_config or {})
+        self._score_delay_threshold_ms = 50
+        self._next_tx_allowed_at: float = 0.0
+        self._recent_tx_packets: dict[int, float] = {}
+        self._own_packet_cache_ttl = OWN_PACKET_CACHE_TTL
+        self._own_packet_cache_max = OWN_PACKET_CACHE_MAX
 
         self.packet_received_callback: Optional[Callable[[Packet], Awaitable[None] | None]] = None
         self.packet_sent_callback: Optional[Callable[[Packet], Awaitable[None] | None]] = None
@@ -148,6 +159,8 @@ class Dispatcher:
         """Quick setup for all the standard packet handlers."""
         # Keep our identity handy for detecting our own packets
         self.local_identity = local_identity
+        if radio_config is not None:
+            self.radio_config = dict(radio_config)
 
         # Set up ACK handler with callback to us
         ack_handler = AckHandler(self._log, self)
@@ -159,6 +172,7 @@ class Dispatcher:
             AdvertHandler(contacts, self._log, local_identity, event_service),
         )
         self.register_handler(AckHandler.payload_type(), ack_handler)
+        self.register_handler(PAYLOAD_TYPE_MULTIPART, ack_handler)
 
         # Text message handler - needs to send ACKs back through us
         text_message_handler = TextMessageHandler(
@@ -204,7 +218,13 @@ class Dispatcher:
         self.telemetry_response_handler = protocol_response_handler
 
         # PATH handler - for route discovery packets, with ACK and protocol response processing
-        path_handler = PathHandler(self._log, ack_handler, protocol_response_handler)
+        path_handler = PathHandler(
+            self._log,
+            local_identity=local_identity,
+            contact_book=contacts,
+            ack_handler=ack_handler,
+            protocol_response_handler=protocol_response_handler,
+        )
         self.register_handler(PathHandler.payload_type(), path_handler)
 
         # Login response handler for PAYLOAD_TYPE_RESPONSE packets
@@ -259,22 +279,17 @@ class Dispatcher:
         return self._handlers.get(ptype, self._fallback_handler)
 
     def _is_own_packet(self, pkt: Packet) -> bool:
-        """Check if this packet came from us by comparing the source hash."""
-        if not self.local_identity or len(pkt.payload) < 2:
+        """Detect our own packets by matching recently transmitted CRCs."""
+
+        if not self.local_identity:
             return False
 
-        # Get our public key hash (first byte)
-        our_pubkey = self.local_identity.get_public_key()
-        our_hash = our_pubkey[0] if len(our_pubkey) > 0 else 0
+        crc = pkt.get_crc()
+        if self._is_recent_outbound_crc(crc):
+            self._log(f"Own packet detected via CRC {crc:08X}")
+            return True
 
-        # Compare with src_hash in payload[1]
-        src_hash = pkt.payload[1]
-        is_own = src_hash == our_hash
-
-        if is_own:
-            self._log(f"Own packet detected: src_hash={src_hash:02X}, our_hash={our_hash:02X}")
-
-        return is_own
+        return False
 
     def set_packet_received_callback(
         self, callback: Callable[[Packet], Awaitable[None] | None]
@@ -346,8 +361,6 @@ class Dispatcher:
         # Let the node know about this packet for analysis (statistics, caching, etc.)
         if self.packet_analysis_callback:
             try:
-                import asyncio
-
                 if asyncio.iscoroutinefunction(self.packet_analysis_callback):
                     await self.packet_analysis_callback(pkt, data)
                 else:
@@ -372,9 +385,144 @@ class Dispatcher:
             self._log(f"Ignoring own packet (type={pkt.header >> 4:02X}) to prevent loops")
             return
 
+        if pkt.is_route_flood():
+            delay_ms, score, airtime_ms = self._calculate_flood_delay_ms(pkt)
+            if delay_ms >= self._score_delay_threshold_ms:
+                self._log(
+                    "[RX DEBUG] Flood packet delay: "
+                    f"{delay_ms}ms (score={score:.2f}, airtime={airtime_ms:.1f}ms)"
+                )
+                await asyncio.sleep(delay_ms / 1000.0)
+            else:
+                self._log(
+                    "[RX DEBUG] Flood score delay below threshold "
+                    f"({delay_ms}ms), processing immediately"
+                )
+
         # Handle ACK matching for waiting senders
         self._log("[RX DEBUG] Dispatching packet to handlers")
         await self._dispatch(pkt)
+
+    def _get_spreading_factor(self) -> Optional[int]:
+        if not self.radio_config:
+            return None
+        sf = self.radio_config.get("spreading_factor")
+        try:
+            return int(sf) if sf is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    def _calculate_flood_delay_ms(self, pkt: Packet) -> tuple[int, float, float]:
+        packet_len = pkt.get_raw_length()
+        airtime_ms = PacketTimingUtils.estimate_airtime_ms(packet_len, self.radio_config or None)
+        snr_db = pkt.snr if pkt.snr is not None else 0.0
+        score = PacketTimingUtils.calculate_packet_score(
+            snr_db,
+            packet_len,
+            self._get_spreading_factor(),
+        )
+        delay_ms = PacketTimingUtils.calc_rx_delay_ms(score, airtime_ms)
+        return delay_ms, score, airtime_ms
+
+    def _estimate_packet_airtime_ms(self, packet: Packet) -> float:
+        return PacketTimingUtils.estimate_airtime_ms(packet.get_raw_length(), self.radio_config or None)
+
+    async def _await_tx_budget_window(self) -> None:
+        if self._next_tx_allowed_at <= 0:
+            return
+        now = asyncio.get_event_loop().time()
+        delay = self._next_tx_allowed_at - now
+        if delay > 0:
+            self._log(f"[TX DEBUG] Airtime budget wait {delay * 1000:.0f}ms")
+            await asyncio.sleep(delay)
+
+    def _schedule_next_tx_window(self, packet_airtime_ms: float) -> None:
+        delay_ms = PacketTimingUtils.calc_airtime_budget_delay_ms(packet_airtime_ms)
+        if delay_ms <= 0:
+            self._next_tx_allowed_at = 0.0
+            return
+        now = asyncio.get_event_loop().time()
+        self._next_tx_allowed_at = now + (delay_ms / 1000.0)
+        self._log(f"[TX DEBUG] Next TX allowed in {delay_ms:.0f}ms")
+
+    async def _ensure_channel_clear(self) -> None:
+        cad_method = getattr(self.radio, "perform_cad", None)
+        if not callable(cad_method):
+            return
+
+        retry_delay = PacketTimingUtils.get_cad_fail_retry_delay_ms() / 1000.0
+        max_duration = PacketTimingUtils.get_cad_fail_max_duration_ms() / 1000.0
+        start = asyncio.get_event_loop().time()
+        attempt = 0
+
+        while True:
+            attempt += 1
+            try:
+                cad_result = await cad_method()
+            except Exception as exc:
+                self._log(f"[TX DEBUG] CAD attempt {attempt} failed: {exc}; continuing with TX")
+                return
+
+            if isinstance(cad_result, dict):
+                channel_busy = bool(
+                    cad_result.get("detected")
+                    or cad_result.get("cad_detected")
+                    or cad_result.get("activity")
+                )
+            else:
+                channel_busy = bool(cad_result)
+
+            if not channel_busy:
+                if attempt > 1:
+                    self._log(f"[TX DEBUG] CAD cleared after {attempt} attempts")
+                return
+
+            elapsed = asyncio.get_event_loop().time() - start
+            remaining = max_duration - elapsed
+            if remaining <= 0:
+                self._log("[TX DEBUG] CAD busy window exceeded, forcing transmit")
+                return
+
+            backoff = min(retry_delay, remaining)
+            self._log(
+                f"[TX DEBUG] CAD detected activity (attempt {attempt}), backing off {backoff * 1000:.0f}ms"
+            )
+            await asyncio.sleep(backoff)
+
+    def _record_outbound_packet_crc(self, crc: int | None) -> None:
+        if crc is None:
+            return
+        now = time.monotonic()
+        self._recent_tx_packets[crc] = now
+        self._prune_recent_outbound(now)
+
+    def _is_recent_outbound_crc(self, crc: int | None) -> bool:
+        if crc is None:
+            return False
+        now = time.monotonic()
+        self._prune_recent_outbound(now)
+        ts = self._recent_tx_packets.get(crc)
+        if ts is None:
+            return False
+        if now - ts > self._own_packet_cache_ttl:
+            self._recent_tx_packets.pop(crc, None)
+            return False
+        return True
+
+    def _prune_recent_outbound(self, now: float) -> None:
+        ttl = self._own_packet_cache_ttl
+        expired = [crc for crc, ts in self._recent_tx_packets.items() if now - ts > ttl]
+        for crc in expired:
+            self._recent_tx_packets.pop(crc, None)
+
+        if len(self._recent_tx_packets) <= self._own_packet_cache_max:
+            return
+
+        # Drop oldest entries until within cap to bound memory usage
+        for crc, _ in sorted(self._recent_tx_packets.items(), key=lambda item: item[1]):
+            self._recent_tx_packets.pop(crc, None)
+            if len(self._recent_tx_packets) <= self._own_packet_cache_max:
+                break
 
     # ------------------------------------------------------------------
     # Public interface - sending and receiving packets
@@ -396,6 +544,7 @@ class Dispatcher:
                 If None, will be calculated from packet.
         """
         payload_type = packet.header >> PH_TYPE_SHIFT
+        packet_crc = packet.get_crc()
 
         # ------------------------------------------------------------------ #
         #  Make sure we're not already busy
@@ -403,6 +552,16 @@ class Dispatcher:
         if self.state != DispatcherState.IDLE:
             self._log("Busy, skipping TX.")
             return False
+
+        packet_airtime_ms = self._estimate_packet_airtime_ms(packet)
+
+        self.state = DispatcherState.WAIT
+        try:
+            await self._await_tx_budget_window()
+            await self._ensure_channel_clear()
+        except Exception:
+            self.state = DispatcherState.IDLE
+            raise
 
         # ------------------------------------------------------------------ #
         #  Send the packet
@@ -415,6 +574,9 @@ class Dispatcher:
             self._log(f"Radio transmit error: {e}")
             self.state = DispatcherState.IDLE
             return False
+
+        self._record_outbound_packet_crc(packet_crc)
+        self._schedule_next_tx_window(packet_airtime_ms)
         # Log what we sent
         type_name = PAYLOAD_TYPES.get(payload_type, f"UNKNOWN_{payload_type}")
         route_name = ROUTE_TYPES.get(packet.get_route_type(), f"UNKNOWN_{packet.get_route_type()}")
@@ -438,7 +600,7 @@ class Dispatcher:
         if expected_crc is not None:
             self._current_expected_crc = expected_crc
         else:
-            self._current_expected_crc = packet.get_crc()
+            self._current_expected_crc = packet_crc
 
         self._log(
             f"Waiting for ACK with CRC {self._current_expected_crc:08X} (timeout: {ACK_TIMEOUT}s)"

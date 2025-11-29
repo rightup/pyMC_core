@@ -1,12 +1,15 @@
+import struct
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 # from pymc_core.node.events import MeshEvents  # Not currently used
+from pymc_core.node.contact_book import ContactBook
 from pymc_core.node.handlers import (
     AckHandler,
     AdvertHandler,
     BaseHandler,
+    ControlHandler,
     GroupTextHandler,
     LoginResponseHandler,
     PathHandler,
@@ -16,14 +19,19 @@ from pymc_core.node.handlers import (
 )
 from pymc_core.protocol import LocalIdentity, Packet, PacketBuilder
 from pymc_core.protocol.constants import (
+    ADV_TYPE_REPEATER,
+    ADV_TYPE_SENSOR,
     PAYLOAD_TYPE_ACK,
     PAYLOAD_TYPE_ADVERT,
     PAYLOAD_TYPE_ANON_REQ,
+    PAYLOAD_TYPE_CONTROL,
     PAYLOAD_TYPE_GRP_TXT,
+    PAYLOAD_TYPE_MULTIPART,
     PAYLOAD_TYPE_PATH,
     PAYLOAD_TYPE_RESPONSE,
     PAYLOAD_TYPE_TRACE,
     PAYLOAD_TYPE_TXT_MSG,
+    PH_TYPE_SHIFT,
     PUB_KEY_SIZE,
     SIGNATURE_SIZE,
     TIMESTAMP_SIZE,
@@ -127,6 +135,31 @@ class TestAckHandler:
 
         callback.assert_called_once_with(0x12345678)
 
+    @pytest.mark.asyncio
+    async def test_process_multipart_ack_valid(self):
+        """Test decoding of multipart ACK payloads."""
+        packet = Packet()
+        packet.payload = bytearray(b"\x13\x78\x56\x34\x12")
+        packet.payload_len = len(packet.payload)
+
+        crc = await self.handler.process_multipart_ack(packet)
+        assert crc == 0x12345678
+
+    @pytest.mark.asyncio
+    async def test_call_multipart_ack(self):
+        """Ensure multipart ACK packets trigger dispatcher callback."""
+        packet = Packet()
+        packet.payload = bytearray(b"\x13\x78\x56\x34\x12")
+        packet.payload_len = len(packet.payload)
+        packet.header = PAYLOAD_TYPE_MULTIPART << PH_TYPE_SHIFT
+
+        callback = MagicMock()
+        self.handler.set_ack_received_callback(callback)
+
+        await self.handler(packet)
+
+        callback.assert_called_once_with(0x12345678)
+
 
 # Text Message Handler Tests
 class TestTextMessageHandler:
@@ -172,6 +205,90 @@ class TestTextMessageHandler:
 
         # Should return early without processing
         self.log_fn.assert_called()
+
+class TestTextHandlerACL:
+    @pytest.mark.asyncio
+    async def test_cli_command_blocked_without_permission(self, monkeypatch):
+        local_identity = LocalIdentity()
+        contacts = ContactBook()
+        peer = LocalIdentity()
+        record = contacts.add_contact(
+            {
+                "public_key": peer.get_public_key().hex(),
+                "name": "peer",
+                "type": 1,
+            }
+        )
+        contacts.set_permissions(record.public_key, allow_cli=False)
+
+        log_fn = MagicMock()
+        send_packet = AsyncMock()
+        handler = TextMessageHandler(local_identity, contacts, log_fn, send_packet, None)
+
+        dest_hash = local_identity.get_public_key()[0]
+        src_hash = record.src_hash()
+        packet = Packet()
+        packet.payload = bytearray([dest_hash, src_hash]) + bytearray(b"\x00" * 16)
+        packet.payload_len = len(packet.payload)
+        packet.header = 0
+
+        plaintext = (1234).to_bytes(4, "little") + bytes([0x01]) + b"reboot"
+        monkeypatch.setattr(
+            "pymc_core.node.handlers.text.CryptoUtils.mac_then_decrypt",
+            lambda *args, **kwargs: plaintext,
+        )
+
+        await handler(packet)
+
+        send_packet.assert_not_called()
+        log_fn.assert_called()
+
+
+class TestProtocolResponseACL:
+    @pytest.mark.asyncio
+    async def test_telemetry_blocked_when_not_allowed(self, monkeypatch):
+        contacts = ContactBook()
+        local_identity = LocalIdentity()
+        peer = LocalIdentity()
+        record = contacts.add_contact(
+            {
+                "public_key": peer.get_public_key().hex(),
+                "name": "peer",
+                "type": 1,
+            }
+        )
+        contacts.set_permissions(record.public_key, allow_telemetry=False)
+
+        log_fn = MagicMock()
+        handler = ProtocolResponseHandler(log_fn, local_identity, contacts)
+
+        captured = []
+
+        def callback(success, text, parsed):
+            captured.append((success, text, parsed))
+
+        src_hash = record.src_hash()
+        handler.set_response_callback(src_hash, callback)
+
+        packet = Packet()
+        dest_hash = local_identity.get_public_key()[0]
+        packet.payload = bytearray([dest_hash, src_hash]) + bytearray(b"\x00" * 8)
+        packet.payload_len = len(packet.payload)
+        packet.header = (PAYLOAD_TYPE_PATH << 2)
+
+        plaintext = (4321).to_bytes(4, "little") + b"\x01\x02\x03"
+        monkeypatch.setattr(
+            "pymc_core.node.handlers.protocol_response.CryptoUtils.mac_then_decrypt",
+            lambda *args, **kwargs: plaintext,
+        )
+
+        await handler(packet)
+
+        assert captured, "Expected callback to be invoked"
+        success, text, parsed = captured[0]
+        assert success is False
+        assert text == "Telemetry blocked by ACL"
+        assert parsed == {"type": "telemetry", "acl_blocked": True}
 
 
 # Advert Handler Tests
@@ -243,9 +360,30 @@ class TestAdvertHandler:
 class TestPathHandler:
     def setup_method(self):
         self.log_fn = MagicMock()
+        self.local_identity = LocalIdentity()
+        self.remote_identity = LocalIdentity()
+        self.contacts = ContactBook()
+        self.contact = self.contacts.add_contact(
+            {
+                "public_key": self.remote_identity.get_public_key().hex(),
+                "name": "peer",
+                "type": 1,
+            }
+        )
+        self.contacts.set_permissions(self.contact.public_key, allow_telemetry=True)
         self.ack_handler = AckHandler(self.log_fn)
-        self.protocol_response_handler = MagicMock()
-        self.handler = PathHandler(self.log_fn, self.ack_handler, self.protocol_response_handler)
+        self.received_crcs: list[int] = []
+        self.ack_handler.set_ack_received_callback(lambda crc: self.received_crcs.append(crc))
+        self.protocol_response_handler = ProtocolResponseHandler(
+            self.log_fn, self.local_identity, self.contacts
+        )
+        self.handler = PathHandler(
+            self.log_fn,
+            local_identity=self.local_identity,
+            contact_book=self.contacts,
+            ack_handler=self.ack_handler,
+            protocol_response_handler=self.protocol_response_handler,
+        )
 
     def test_payload_type(self):
         """Test path handler payload type."""
@@ -256,6 +394,56 @@ class TestPathHandler:
         assert self.handler._log == self.log_fn
         assert self.handler._ack_handler == self.ack_handler
         assert self.handler._protocol_response_handler == self.protocol_response_handler
+        assert self.handler._contact_book == self.contacts
+        assert self.handler._local_identity == self.local_identity
+
+    def _shared_secret(self) -> bytes:
+        return self.remote_identity.calc_shared_secret(self.local_identity.get_private_key())
+
+    def _build_path_packet(self, extra_type: int, extra_payload: bytes, path: list[int]):
+        return PacketBuilder.create_path_return(
+            dest_hash=self.local_identity.get_public_key()[0],
+            src_hash=self.remote_identity.get_public_key()[0],
+            secret=self._shared_secret(),
+            path=path,
+            extra_type=extra_type,
+            extra=extra_payload,
+        )
+
+    @pytest.mark.asyncio
+    async def test_path_handler_updates_path_and_notifies_ack(self):
+        path = [1, 2, 3]
+        crc = 0x11223344
+        packet = self._build_path_packet(PAYLOAD_TYPE_ACK, crc.to_bytes(4, "little"), path)
+
+        await self.handler(packet)
+
+        contact = self.contacts.get_by_public_key(self.remote_identity.get_public_key().hex())
+        assert contact is not None
+        assert contact.out_path == path
+        assert self.received_crcs == [crc]
+
+    @pytest.mark.asyncio
+    async def test_path_handler_forwards_protocol_responses(self):
+        captured = []
+        src_hash = self.remote_identity.get_public_key()[0]
+        self.protocol_response_handler.set_response_callback(
+            src_hash, lambda success, text, parsed: captured.append((success, text, parsed))
+        )
+
+        payload = b"mesh ok"
+        packet = self._build_path_packet(PAYLOAD_TYPE_RESPONSE, payload, [7, 8])
+
+        await self.handler(packet)
+
+        assert self.received_crcs == []
+        assert len(captured) == 1
+        success, text, parsed = captured[0]
+        assert success is True
+        assert text.startswith("Unknown telemetry")
+        assert parsed.get("type") == "telemetry"
+        contact = self.contacts.get_by_public_key(self.remote_identity.get_public_key().hex())
+        assert contact.out_path == [7, 8]
 
 
 # Group Text Handler Tests
@@ -303,6 +491,136 @@ class TestLoginResponseHandler:
         assert self.handler.log == self.log_fn
         assert self.handler.local_identity == self.local_identity
         assert self.handler.local_identity == self.local_identity
+
+class TestControlHandler:
+    def setup_method(self):
+        self.log_fn = MagicMock()
+        self.handler = ControlHandler(self.log_fn)
+
+    def test_payload_type(self):
+        assert ControlHandler.payload_type() == PAYLOAD_TYPE_CONTROL
+
+    @pytest.mark.asyncio
+    async def test_discovery_request_callback_receives_details(self):
+        captured: list[dict] = []
+
+        def on_request(data: dict):
+            captured.append(data)
+
+        self.handler.set_request_callback(on_request)
+
+        pkt = Packet()
+        tag = 0xA1B2C3D4
+        since = 1_700_000_000
+        filter_mask = (1 << ADV_TYPE_REPEATER) | (1 << ADV_TYPE_SENSOR)
+        payload = bytearray()
+        payload.append(0x80 | 0x01)
+        payload.append(filter_mask)
+        payload.extend(struct.pack("<I", tag))
+        payload.extend(struct.pack("<I", since))
+        pkt.payload = payload
+        pkt.payload_len = len(payload)
+        pkt.path_len = 0
+        pkt._snr = 9.25
+        pkt._rssi = -48
+
+        await self.handler(pkt)
+
+        assert captured, "request callback not invoked"
+        data = captured[0]
+        assert data["tag"] == tag
+        assert data["filter_mask"] == filter_mask
+        assert data["requested_types"] == [ADV_TYPE_REPEATER, ADV_TYPE_SENSOR]
+        assert data["requested_type_names"] == ["repeater", "sensor"]
+        assert data["since"] == since
+        assert data["since_active"] is True
+        assert data["prefix_only"] is True
+        assert data["snr"] == pkt._snr
+        assert data["raw_snr"] == pkt._snr
+        assert data["rssi"] == pkt._rssi
+        assert data["payload_len"] == len(payload)
+        assert "unknown_filter_bits" not in data
+
+    @pytest.mark.asyncio
+    async def test_discovery_response_callback_full_key(self):
+        captured: list[dict] = []
+        tag = 0x01020304
+
+        def on_response(data: dict):
+            captured.append(data)
+
+        self.handler.set_response_callback(tag, on_response)
+
+        pub_key = bytes(range(32))
+        inbound_snr = 6.25
+        payload = bytearray()
+        payload.append(0x90 | ADV_TYPE_REPEATER)
+        payload.append(int(inbound_snr * 4) & 0xFF)
+        payload.extend(struct.pack("<I", tag))
+        payload.extend(pub_key)
+
+        pkt = Packet()
+        pkt.payload = payload
+        pkt.payload_len = len(payload)
+        pkt.path_len = 0
+        pkt._snr = 7.5
+        pkt._rssi = -63
+
+        await self.handler(pkt)
+
+        assert captured, "response callback not invoked"
+        data = captured[0]
+        assert data["node_type"] == ADV_TYPE_REPEATER
+        assert data["node_type_name"] == "repeater"
+        assert data["inbound_snr"] == pytest.approx(inbound_snr)
+        assert data["response_snr"] == pytest.approx(pkt._snr)
+        assert data["raw_response_snr"] == pkt._snr
+        assert data["rssi"] == pkt._rssi
+        assert data["prefix_only"] is False
+        assert data["key_length"] == 32
+        assert data["pub_key_bytes"] == pub_key
+        assert data["pub_key_prefix_bytes"] == pub_key[:8]
+        assert data["pub_key_prefix"] == pub_key[:8].hex()
+        assert self.handler._response_callbacks == {}
+
+    @pytest.mark.asyncio
+    async def test_discovery_response_callback_prefix_key(self):
+        captured: list[dict] = []
+        tag = 0x0BADBEEF
+
+        def on_response(data: dict):
+            captured.append(data)
+
+        self.handler.set_response_callback(tag, on_response)
+
+        pub_key = bytes.fromhex("0123456789ABCDEF0123456789ABCDEF")[:8]
+        inbound_snr = -2.5
+        payload = bytearray()
+        payload.append(0x90 | ADV_TYPE_SENSOR)
+        payload.append(int(inbound_snr * 4) & 0xFF)
+        payload.extend(struct.pack("<I", tag))
+        payload.extend(pub_key)
+
+        pkt = Packet()
+        pkt.payload = payload
+        pkt.payload_len = len(payload)
+        pkt.path_len = 0
+        pkt._snr = -1.25
+        pkt._rssi = -71
+
+        await self.handler(pkt)
+
+        assert captured, "response callback not invoked"
+        data = captured[0]
+        assert data["node_type"] == ADV_TYPE_SENSOR
+        assert data["node_type_name"] == "sensor"
+        assert data["inbound_snr"] == pytest.approx(inbound_snr)
+        assert data["response_snr"] == pytest.approx(pkt._snr)
+        assert data["prefix_only"] is True
+        assert data["key_length"] == 8
+        assert data["pub_key_bytes"] == pub_key
+        assert data["pub_key_prefix_bytes"] == pub_key
+        assert data["pub_key_prefix"] == pub_key.hex()
 
 
 # Protocol Response Handler Tests

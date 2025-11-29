@@ -2,6 +2,8 @@
 Centralized protocol utility functions and lookup tables for mesh network.
 """
 
+import struct
+
 from .constants import (
     ADVERT_FLAG_HAS_FEATURE1,
     ADVERT_FLAG_HAS_FEATURE2,
@@ -10,6 +12,7 @@ from .constants import (
     ADVERT_FLAG_IS_CHAT_NODE,
     ADVERT_FLAG_IS_REPEATER,
     ADVERT_FLAG_IS_ROOM_SERVER,
+    ADVERT_FLAG_IS_SENSOR,
     PUB_KEY_SIZE,
     SIGNATURE_SIZE,
     TIMESTAMP_SIZE,
@@ -17,13 +20,14 @@ from .constants import (
 
 # Lookup tables
 APPDATA_FLAGS = {
-    0x01: "is_chat_node",
-    0x02: "is_repeater",
-    0x04: "is_room_server",
-    0x10: "has_location",
-    0x20: "has_feature_1",
-    0x40: "has_feature_2",
-    0x80: "has_name",
+    ADVERT_FLAG_IS_CHAT_NODE: "is_chat_node",
+    ADVERT_FLAG_IS_REPEATER: "is_repeater",
+    ADVERT_FLAG_IS_ROOM_SERVER: "is_room_server",
+    ADVERT_FLAG_IS_SENSOR: "is_sensor",
+    ADVERT_FLAG_HAS_LOCATION: "has_location",
+    ADVERT_FLAG_HAS_FEATURE1: "has_feature_1",
+    ADVERT_FLAG_HAS_FEATURE2: "has_feature_2",
+    ADVERT_FLAG_HAS_NAME: "has_name",
 }
 
 REQUEST_TYPES = {0x01: "get_status", 0x02: "keepalive", 0x03: "get_telemetry_data"}
@@ -96,48 +100,48 @@ def parse_advert_payload(payload: bytes):
 
 
 def decode_appdata(appdata: bytes) -> dict:
-    result = {}
-    offset = 0
     if len(appdata) < 1:
         raise ValueError("Appdata too short to contain flags")
+
+    result: dict[str, object] = {}
+    offset = 0
     flags = appdata[offset]
     result["flags"] = flags
     offset += 1
 
-    # Parse conditional fields based on flags (following the same logic as packet_analyzer)
-    if flags & 0x10:  # has_location
-        if len(appdata) >= offset + 8:
-            import struct
+    def read_bytes(length: int, field: str) -> bytes:
+        nonlocal offset
+        end = offset + length
+        if end > len(appdata):
+            raise ValueError(
+                f"Appdata indicates {field}, but only {len(appdata) - offset} bytes remain"
+            )
+        chunk = appdata[offset:end]
+        offset = end
+        return chunk
 
-            lat_raw = struct.unpack("<i", appdata[offset : offset + 4])[0]
-            lon_raw = struct.unpack("<i", appdata[offset + 4 : offset + 8])[0]
-            result["latitude"] = lat_raw / 1000000.0
-            result["longitude"] = lon_raw / 1000000.0
-            offset += 8
+    if flags & ADVERT_FLAG_HAS_LOCATION:
+        lat_raw, lon_raw = struct.unpack("<ii", read_bytes(8, "latitude/longitude"))
+        result["latitude"] = lat_raw / 1_000_000.0
+        result["longitude"] = lon_raw / 1_000_000.0
 
-    if flags & 0x20:  # has_feature_1
-        if len(appdata) >= offset + 2:
-            import struct
+    if flags & ADVERT_FLAG_HAS_FEATURE1:
+        (feature_one,) = struct.unpack("<H", read_bytes(2, "feature_1"))
+        result["feature_1"] = feature_one
 
-            result["feature_1"] = struct.unpack("<H", appdata[offset : offset + 2])[0]
-            offset += 2
+    if flags & ADVERT_FLAG_HAS_FEATURE2:
+        (feature_two,) = struct.unpack("<H", read_bytes(2, "feature_2"))
+        result["feature_2"] = feature_two
 
-    if flags & 0x40:  # has_feature_2
-        if len(appdata) >= offset + 2:
-            import struct
-
-            result["feature_2"] = struct.unpack("<H", appdata[offset : offset + 2])[0]
-            offset += 2
-
-    if flags & 0x80:  # has_name
-        if len(appdata) > offset:
+    if flags & ADVERT_FLAG_HAS_NAME:
+        name_bytes = appdata[offset:]
+        if name_bytes:
             try:
-                name = appdata[offset:].decode("utf-8").rstrip("\x00").strip()
-                if name:  # Only add if non-empty
+                name = name_bytes.decode("utf-8").rstrip("\x00").strip()
+                if name:
                     result["node_name"] = name
             except UnicodeDecodeError:
-                # If UTF-8 decoding fails, store as hex for debugging
-                result["raw_name_bytes"] = appdata[offset:].hex()
+                result["raw_name_bytes"] = name_bytes.hex()
                 result["name_decode_error"] = True
 
     return result

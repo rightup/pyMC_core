@@ -60,10 +60,26 @@ NAME_MAX_LEN = 16  # Max length of a contact name
 TIMESTAMP_SIZE = 4  # 4 bytes for a timestamp (32-bit unsigned int)
 # ---------------------------------------------------------------------------
 
+# Node Advert Types (ADV_TYPE_* from firmware)
+ADV_TYPE_NONE = 0
+ADV_TYPE_CHAT = 1
+ADV_TYPE_REPEATER = 2
+ADV_TYPE_ROOM = 3
+ADV_TYPE_SENSOR = 4
+
+ADV_TYPE_LABELS = {
+    ADV_TYPE_NONE: "unknown",
+    ADV_TYPE_CHAT: "chat",
+    ADV_TYPE_REPEATER: "repeater",
+    ADV_TYPE_ROOM: "room",
+    ADV_TYPE_SENSOR: "sensor",
+}
+
 # Node Advert Flags (bitfield values)
 ADVERT_FLAG_IS_CHAT_NODE = 0x01
 ADVERT_FLAG_IS_REPEATER = 0x02
 ADVERT_FLAG_IS_ROOM_SERVER = 0x04
+ADVERT_FLAG_IS_SENSOR = 0x08
 ADVERT_FLAG_HAS_LOCATION = 0x10
 ADVERT_FLAG_HAS_FEATURE1 = 0x20
 ADVERT_FLAG_HAS_FEATURE2 = 0x40
@@ -79,6 +95,8 @@ def describe_advert_flags(flags: int) -> str:
         labels.append("is repeater")
     if flags & ADVERT_FLAG_IS_ROOM_SERVER:
         labels.append("is room server")
+    if flags & ADVERT_FLAG_IS_SENSOR:
+        labels.append("is sensor")
     if flags & ADVERT_FLAG_HAS_LOCATION:
         labels.append("has location")
     if flags & ADVERT_FLAG_HAS_FEATURE1:

@@ -63,27 +63,23 @@ class ProtocolResponseHandler:
             )
 
             # Try to decrypt the response
-            success, decoded_text, parsed_data = await self._decrypt_protocol_response(
+            success, decoded_text, parsed_data, contact = await self._decrypt_protocol_response(
                 pkt, src_hash
             )
-
-            # Call the waiting callback
-            callback = self._response_callbacks[src_hash]
-            if callback:
-                callback(success, decoded_text, parsed_data)
+            await self._deliver_response(src_hash, success, decoded_text, parsed_data, contact)
 
         except Exception as e:
             self._log(f"[ProtocolResponse] Error processing protocol response: {e}")
 
     async def _decrypt_protocol_response(
         self, pkt: Packet, src_hash: int
-    ) -> tuple[bool, str, Dict[str, Any]]:
+    ) -> tuple[bool, str, Dict[str, Any], Optional[Any]]:
         """Decrypt and parse a protocol response packet."""
         try:
             # Find the contact by hash
             contact = self._find_contact_by_hash(src_hash)
             if not contact:
-                return False, f"Unknown contact for hash 0x{src_hash:02X}", {}
+                return False, f"Unknown contact for hash 0x{src_hash:02X}", {}, None
 
             # Get encryption keys
             contact_pubkey = bytes.fromhex(contact.public_key)
@@ -100,11 +96,54 @@ class ProtocolResponseHandler:
             self._log(f"[ProtocolResponse] Successfully decrypted {len(decrypted)} bytes")
 
             # Parse based on content type
-            return self._parse_protocol_response(decrypted)
+            success, decoded_text, parsed_data = self._parse_protocol_response(decrypted)
+            return success, decoded_text, parsed_data, contact
 
         except Exception as e:
             self._log(f"[ProtocolResponse] Decryption failed: {e}")
-            return False, f"Decryption failed: {e}", {}
+            return False, f"Decryption failed: {e}", {}, contact if 'contact' in locals() else None
+
+    async def handle_plaintext_response(
+        self, src_hash: int, contact: Optional[Any], plaintext: bytes
+    ) -> None:
+        """Process a plaintext response that has already been decrypted."""
+        try:
+            success, decoded_text, parsed_data = self._parse_protocol_response(plaintext)
+        except Exception as exc:
+            self._log(f"[ProtocolResponse] Plaintext parsing failed: {exc}")
+            success, decoded_text, parsed_data = False, f"Parse error: {exc}", {}
+
+        await self._deliver_response(src_hash, success, decoded_text, parsed_data, contact)
+
+    async def _deliver_response(
+        self,
+        src_hash: int,
+        success: bool,
+        decoded_text: str,
+        parsed_data: Dict[str, Any],
+        contact: Optional[Any],
+    ) -> None:
+        """Invoke waiting callback with ACL enforcement."""
+        if src_hash not in self._response_callbacks:
+            return
+
+        if (
+            success
+            and parsed_data.get("type") == "telemetry"
+            and contact
+            and hasattr(self._contact_book, "can_receive_telemetry")
+        ):
+            if not self._contact_book.can_receive_telemetry(contact):
+                self._log(
+                    "[ProtocolResponse] Telemetry blocked by ACL for " f"0x{src_hash:02X}"
+                )
+                success = False
+                decoded_text = "Telemetry blocked by ACL"
+                parsed_data = {"type": "telemetry", "acl_blocked": True}
+
+        callback = self._response_callbacks.get(src_hash)
+        if callback:
+            callback(success, decoded_text, parsed_data)
 
     def _parse_protocol_response(self, data: bytes) -> tuple[bool, str, Dict[str, Any]]:
         """Parse decrypted protocol response data."""

@@ -11,6 +11,7 @@ if not hasattr(collections, "Hashable"):
     setattr(collections, "Hashable", collections.abc.Hashable)
 
 from ..protocol import LocalIdentity
+from .contact_book import ContactBook
 from .dispatcher import Dispatcher
 
 logger = logging.getLogger("Node")
@@ -54,7 +55,7 @@ class MeshNode:
         """
         self.radio = radio
         self.identity = local_identity
-        self.contacts = contacts  # App can inject contact storage
+        self.contacts = contacts or ContactBook()
         self.channel_db = channel_db  # App can inject channel database
         self.event_service = event_service  # App can inject event service
 

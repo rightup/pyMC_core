@@ -17,6 +17,9 @@ from .constants import (
 )
 from .packet_utils import PacketDataUtils, PacketHashingUtils, PacketValidationUtils
 
+
+DO_NOT_RETRANSMIT_HEADER = 0xFF
+
 """
 ╔═══════════════════════════════════════════════════════════════════════════╗
 ║                          MESH PACKET STRUCTURE OVERVIEW                   ║
@@ -110,7 +113,6 @@ class Packet:
         "transport_codes",
         "_snr",
         "_rssi",
-        "_do_not_retransmit",
     )
 
     def __init__(self):
@@ -130,7 +132,6 @@ class Packet:
         self.transport_codes = [0, 0]  # Array of two 16-bit transport codes
         self._snr = 0
         self._rssi = 0
-        self._do_not_retransmit = False
 
     def get_route_type(self) -> int:
         """
@@ -150,14 +151,21 @@ class Packet:
         Extract the 4-bit payload type from the packet header.
 
         Returns:
-            int: Payload type value indicating the type of data in the packet:
-                - 0: Plain text message
-                - 1: Encrypted message
-                - 2: ACK packet
-                - 3: Advertisement
-                - 4: Login request/response
-                - 5: Protocol control
-                - 6-15: Reserved for future use
+            int: Payload type value (bits 2-5) describing the payload semantics:
+                - 0x00: `PAYLOAD_TYPE_REQ` (protocol requests)
+                - 0x01: `PAYLOAD_TYPE_RESPONSE` (login / protocol responses)
+                - 0x02: `PAYLOAD_TYPE_TXT_MSG` (direct text datagrams)
+                - 0x03: `PAYLOAD_TYPE_ACK` (delivery acknowledgements)
+                - 0x04: `PAYLOAD_TYPE_ADVERT` (node advertisements)
+                - 0x05: `PAYLOAD_TYPE_GRP_TXT` (group/channel text)
+                - 0x06: `PAYLOAD_TYPE_GRP_DATA` (channel binary data)
+                - 0x07: `PAYLOAD_TYPE_ANON_REQ` (anonymous requests/login)
+                - 0x08: `PAYLOAD_TYPE_PATH` (returned path + responses)
+                - 0x09: `PAYLOAD_TYPE_TRACE` (trace diagnostics)
+                - 0x0A: `PAYLOAD_TYPE_MULTIPART` (wrapper with inner payload)
+                - 0x0B: `PAYLOAD_TYPE_CONTROL` (discovery/control plane)
+                - 0x0F: `PAYLOAD_TYPE_RAW_CUSTOM` (vendor-specific)
+                Remaining values are reserved by MeshCore.
         """
         return (self.header >> PH_TYPE_SHIFT) & PH_TYPE_MASK
 
@@ -286,8 +294,8 @@ class Packet:
         # Add transport codes if this packet type requires them
         if self.has_transport_codes():
             # Pack two 16-bit transport codes (4 bytes total) in little-endian format
-            out.extend(self.transport_codes[0].to_bytes(2, 'little'))
-            out.extend(self.transport_codes[1].to_bytes(2, 'little'))
+            out.extend((self.transport_codes[0] & 0xFFFF).to_bytes(2, "little"))
+            out.extend((self.transport_codes[1] & 0xFFFF).to_bytes(2, "little"))
         
         out.append(self.path_len)
         out += self.path
@@ -319,8 +327,8 @@ class Packet:
         if self.has_transport_codes():
             self._check_bounds(idx, 4, data_len, "missing transport codes")
             # Unpack two 16-bit transport codes from little-endian format
-            self.transport_codes[0] = int.from_bytes(data[idx:idx+2], 'little')
-            self.transport_codes[1] = int.from_bytes(data[idx+2:idx+4], 'little')
+            self.transport_codes[0] = int.from_bytes(data[idx:idx+2], "little")
+            self.transport_codes[1] = int.from_bytes(data[idx+2:idx+4], "little")
             idx += 4
         else:
             self.transport_codes = [0, 0]
@@ -471,7 +479,7 @@ class Packet:
         Used by destination nodes after successfully decrypting and processing
         a message intended for them.
         """
-        self._do_not_retransmit = True
+        self.header = DO_NOT_RETRANSMIT_HEADER
 
     def is_marked_do_not_retransmit(self) -> bool:
         """
@@ -482,4 +490,4 @@ class Packet:
                 This indicates the packet has reached its destination or should
                 remain local to the receiving node.
         """
-        return self._do_not_retransmit
+        return self.header == DO_NOT_RETRANSMIT_HEADER

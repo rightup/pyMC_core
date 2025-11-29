@@ -4,8 +4,9 @@ Consolidates common operations between Packet and PacketBuilder classes.
 """
 
 import hashlib
+import math
 import struct
-from typing import Any, List, Union
+from typing import Any, List, Optional, Union
 
 from .constants import (
     MAX_HASH_SIZE,
@@ -214,7 +215,8 @@ class PacketHashingUtils:
         sha = hashlib.sha256()
         sha.update(bytes([payload_type]))
         if payload_type == PAYLOAD_TYPE_TRACE:
-            sha.update(bytes([path_len]))
+            # MeshCore feeds the two-byte path_len field as-is for TRACE hashes
+            sha.update(struct.pack("<H", path_len & 0xFFFF))
         sha.update(payload)
         return sha.digest()[:MAX_HASH_SIZE]
 
@@ -272,6 +274,20 @@ class RouteTypeUtils:
 class PacketTimingUtils:
     """Utilities for packet transmission timing calculations."""
 
+    DEFAULT_BUDGET_FACTOR = 2.0  # Matches Dispatcher::getAirtimeBudgetFactor
+    CAD_FAIL_RETRY_DELAY_MS = 200  # Matches Dispatcher::getCADFailRetryDelay
+    CAD_FAIL_MAX_DURATION_MS = 4000  # Matches Dispatcher::getCADFailMaxDuration
+    MAX_RX_DELAY_MS = 32_000  # Dispatcher::MAX_RX_DELAY_MILLIS
+    DEFAULT_SPREADING_FACTOR = 10
+    SNR_THRESHOLDS = {
+        7: -7.5,
+        8: -10.0,
+        9: -12.5,
+        10: -15.0,
+        11: -17.5,
+        12: -20.0,
+    }
+
     @staticmethod
     def estimate_airtime_ms(packet_length_bytes: int, radio_config: dict = None) -> float:
         """
@@ -288,38 +304,57 @@ class PacketTimingUtils:
         if radio_config is None:
             radio_config = {
                 "spreading_factor": 10,
-                "bandwidth": 250000,  # 250kHz
-                "coding_rate": 5,
+                "bandwidth": 250_000,  # Hz
+                "coding_rate": 5,  # LoRa denominator (4/5 defaults to 5)
                 "preamble_length": 8,
+                "explicit_header": True,
+                "crc_enabled": True,
             }
 
         if "measured_airtime_ms" in radio_config:
-            return radio_config["measured_airtime_ms"]
+            return float(radio_config["measured_airtime_ms"])
 
-        sf = radio_config.get("spreading_factor", 10)
-        bw = radio_config.get("bandwidth", 250000)  # Hz or kHz - convert to Hz if needed
-        cr = radio_config.get("coding_rate", 5)
-        preamble = radio_config.get("preamble_length", 8)
+        sf = int(radio_config.get("spreading_factor", 10))
+        bw_hz = float(radio_config.get("bandwidth", 250_000))
+        coding_rate = int(radio_config.get("coding_rate", 5))
+        preamble = float(radio_config.get("preamble_length", 8))
+        explicit_header = bool(radio_config.get("explicit_header", True))
+        crc_enabled = bool(radio_config.get("crc_enabled", True))
 
-        # Convert bandwidth to Hz if it's in kHz (values < 1000 are assumed to be kHz)
-        if bw < 1000:
-            bw = bw * 1000  # Convert kHz to Hz
+        if bw_hz < 1000:
+            bw_hz *= 1000.0  # accept kHz inputs
 
-        symbol_time = (2**sf) / bw  # seconds per symbol
+        # Low data rate optimization mirrors RadioLib: enable for SF >= 11 at <=125kHz unless overridden.
+        ldro = radio_config.get("low_data_rate_optimize")
+        if ldro is None:
+            ldro = sf >= 11 and bw_hz <= 125_000
+        de = 1 if ldro else 0
 
-        # Preamble time
-        preamble_time = preamble * symbol_time
+        # Convert coding rate to the 1..4 representation used by Semtech's formula.
+        if coding_rate > 4:
+            cr_setting = coding_rate - 4
+        else:
+            cr_setting = coding_rate
+        cr_setting = max(1, min(4, cr_setting))
 
-        # Payload symbols (simplified)
-        payload_symbols = 8 + max(0, (packet_length_bytes * 8 - 4 * sf + 28) // (4 * (sf - 2))) * (
-            cr + 4
+        h = 0 if explicit_header else 1
+        crc_term = 16 if crc_enabled else 0
+        denom = 4 * (sf - 2 * de)
+        if denom <= 0:
+            raise ValueError("Invalid radio configuration: spreading_factor too low for LDRO setting")
+
+        payload_numerator = (8 * packet_length_bytes) - (4 * sf) + 28 + crc_term - (20 * h)
+        payload_symbols = 8 + max(
+            math.ceil(payload_numerator / denom) * (cr_setting + 4),
+            0,
         )
-        payload_time = payload_symbols * symbol_time
 
-        total_time_ms = (preamble_time + payload_time) * 1000
+        symbol_time_sec = (2**sf) / bw_hz
+        preamble_time_sec = (preamble + 4.25) * symbol_time_sec
+        payload_time_sec = payload_symbols * symbol_time_sec
 
-        # Add some overhead for processing and turnaround
-        return max(total_time_ms, 50.0)  # Minimum 50ms
+        total_time_ms = (preamble_time_sec + payload_time_sec) * 1000.0
+        return max(total_time_ms, 1.0)
 
     @staticmethod
     def calc_flood_timeout_ms(packet_airtime_ms: float) -> float:
@@ -359,3 +394,64 @@ class PacketTimingUtils:
             (packet_airtime_ms * DIRECT_SEND_PERHOP_FACTOR + DIRECT_SEND_PERHOP_EXTRA_MILLIS)
             * (path_len + 1)
         )
+
+    @staticmethod
+    def calc_rx_delay_ms(
+        score: float,
+        packet_airtime_ms: float,
+        max_delay_ms: Optional[int] = None,
+    ) -> int:
+        """Replicate Dispatcher::calcRxDelay using the MeshCore score heuristic."""
+
+        delay = (math.pow(10.0, 0.85 - score) - 1.0) * packet_airtime_ms
+        if delay <= 0:
+            return 0
+        limit = PacketTimingUtils.MAX_RX_DELAY_MS if max_delay_ms is None else max_delay_ms
+        return min(int(round(delay)), limit)
+
+    @staticmethod
+    def calc_airtime_budget_delay_ms(
+        packet_airtime_ms: float,
+        budget_factor: Optional[float] = None,
+    ) -> float:
+        """Return the radio silence interval enforced after a send (Dispatcher::getAirtimeBudgetFactor)."""
+
+        factor = PacketTimingUtils.DEFAULT_BUDGET_FACTOR if budget_factor is None else budget_factor
+        return max(packet_airtime_ms * factor, 0.0)
+
+    @staticmethod
+    def get_cad_fail_retry_delay_ms() -> int:
+        """Expose Dispatcher::getCADFailRetryDelay for CAD back-off modeling."""
+
+        return PacketTimingUtils.CAD_FAIL_RETRY_DELAY_MS
+
+    @staticmethod
+    def get_cad_fail_max_duration_ms() -> int:
+        """Expose Dispatcher::getCADFailMaxDuration for CAD timeout modeling."""
+
+        return PacketTimingUtils.CAD_FAIL_MAX_DURATION_MS
+
+    @staticmethod
+    def calculate_packet_score(
+        snr_db: float,
+        packet_len_bytes: int,
+        spreading_factor: Optional[int] = None,
+    ) -> float:
+        """Approximate mesh::Radio::packetScore from MeshCore RadioLib wrappers."""
+
+        sf = spreading_factor or PacketTimingUtils.DEFAULT_SPREADING_FACTOR
+        if sf < 7:
+            return 0.0
+
+        threshold = PacketTimingUtils.SNR_THRESHOLDS.get(sf, PacketTimingUtils.SNR_THRESHOLDS[10])
+        if snr_db < threshold:
+            return 0.0
+
+        success_rate = (snr_db - threshold) / 10.0
+        collision_penalty = 1.0 - min(max(packet_len_bytes / 256.0, 0.0), 1.0)
+        score = success_rate * collision_penalty
+        if score < 0.0:
+            return 0.0
+        if score > 1.0:
+            return 1.0
+        return score

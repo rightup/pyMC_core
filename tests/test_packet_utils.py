@@ -2,12 +2,25 @@ import struct
 
 import pytest
 
-from pymc_core.protocol.constants import MAX_PACKET_PAYLOAD, MAX_PATH_SIZE
+from pymc_core.protocol.constants import (
+    ADVERT_FLAG_HAS_FEATURE1,
+    ADVERT_FLAG_HAS_FEATURE2,
+    ADVERT_FLAG_HAS_LOCATION,
+    ADVERT_FLAG_HAS_NAME,
+    ADVERT_FLAG_IS_SENSOR,
+    MAX_PACKET_PAYLOAD,
+    MAX_PATH_SIZE,
+    PUB_KEY_SIZE,
+    SIGNATURE_SIZE,
+    TIMESTAMP_SIZE,
+)
 from pymc_core.protocol.packet_utils import (
     PacketDataUtils,
     PacketHashingUtils,
+    PacketTimingUtils,
     PacketValidationUtils,
 )
+from pymc_core.protocol.utils import decode_appdata, parse_advert_payload
 
 
 class TestPacketValidationUtils:
@@ -180,3 +193,96 @@ class TestPacketHashingUtils:
         assert truncated == expected_hex[:16]
         assert len(truncated) == 16
         assert truncated.isupper()
+
+
+class TestAppdataDecoding:
+    def test_decode_appdata_parses_optional_fields(self):
+        flags = (
+            ADVERT_FLAG_HAS_LOCATION
+            | ADVERT_FLAG_HAS_FEATURE1
+            | ADVERT_FLAG_HAS_FEATURE2
+            | ADVERT_FLAG_HAS_NAME
+        )
+        lat_raw, lon_raw = 12_345_678, -98_765_432
+        feature_1 = 0x1234
+        feature_2 = 0xABCD
+        name = "MeshNode"
+        appdata = bytearray([flags])
+        appdata.extend(struct.pack("<ii", lat_raw, lon_raw))
+        appdata.extend(struct.pack("<H", feature_1))
+        appdata.extend(struct.pack("<H", feature_2))
+        appdata.extend(name.encode("utf-8") + b"\x00")
+
+        decoded = decode_appdata(bytes(appdata))
+
+        assert decoded["flags"] == flags
+        assert decoded["latitude"] == pytest.approx(lat_raw / 1_000_000.0)
+        assert decoded["longitude"] == pytest.approx(lon_raw / 1_000_000.0)
+        assert decoded["feature_1"] == feature_1
+        assert decoded["feature_2"] == feature_2
+        assert decoded["node_name"] == name
+
+    def test_decode_appdata_raises_when_flagged_field_is_missing(self):
+        flags = ADVERT_FLAG_HAS_FEATURE1
+        with pytest.raises(ValueError, match="feature_1"):
+            decode_appdata(bytes([flags]))
+
+    def test_decode_appdata_preserves_sensor_only_prefix_payload(self):
+        flags = ADVERT_FLAG_IS_SENSOR
+        decoded = decode_appdata(bytes([flags]))
+        assert decoded == {"flags": flags}
+
+    def test_decode_appdata_records_invalid_utf8_names(self):
+        flags = ADVERT_FLAG_HAS_NAME
+        invalid_name = bytes([0xFF, 0xFE])
+        decoded = decode_appdata(bytes([flags]) + invalid_name)
+        assert "node_name" not in decoded
+        assert decoded["raw_name_bytes"] == invalid_name.hex()
+        assert decoded["name_decode_error"] is True
+
+
+def test_parse_advert_payload_allows_flag_only_appdata():
+    pubkey = bytes(range(PUB_KEY_SIZE))
+    timestamp = (123456789).to_bytes(TIMESTAMP_SIZE, "little")
+    signature = bytes(range(PUB_KEY_SIZE, PUB_KEY_SIZE + SIGNATURE_SIZE))
+    appdata = bytes([ADVERT_FLAG_IS_SENSOR])
+
+    payload = pubkey + timestamp + signature + appdata
+    parsed = parse_advert_payload(payload)
+
+    assert parsed["pubkey"] == pubkey.hex()
+    assert parsed["appdata"] == appdata
+
+
+class TestPacketTimingUtils:
+    def test_estimate_airtime_matches_meshcore_formula_defaults(self):
+        airtime = PacketTimingUtils.estimate_airtime_ms(64)
+        assert airtime == pytest.approx(349.184, rel=1e-3)
+
+    def test_estimate_airtime_respects_ldro_and_override(self):
+        config = {
+            "spreading_factor": 12,
+            "bandwidth": 125_000,
+            "coding_rate": 5,
+            "preamble_length": 8,
+        }
+        airtime = PacketTimingUtils.estimate_airtime_ms(16, config)
+        assert airtime == pytest.approx(1318.912, rel=1e-3)
+
+        measured = PacketTimingUtils.estimate_airtime_ms(16, {"measured_airtime_ms": 42.0})
+        assert measured == 42.0
+
+    def test_calc_rx_delay_matches_dispatcher_formula(self):
+        airtime = 350.0
+        delay = PacketTimingUtils.calc_rx_delay_ms(score=0.5, packet_airtime_ms=airtime)
+        assert delay == 434
+
+        zero_delay = PacketTimingUtils.calc_rx_delay_ms(score=1.5, packet_airtime_ms=airtime)
+        assert zero_delay == 0
+
+    def test_airtime_budget_and_cad_constants(self):
+        airtime = 200.0
+        assert PacketTimingUtils.calc_airtime_budget_delay_ms(airtime) == pytest.approx(400.0)
+        assert PacketTimingUtils.calc_airtime_budget_delay_ms(airtime, budget_factor=1.5) == pytest.approx(300.0)
+        assert PacketTimingUtils.get_cad_fail_retry_delay_ms() == 200
+        assert PacketTimingUtils.get_cad_fail_max_duration_ms() == 4000

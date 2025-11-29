@@ -11,6 +11,7 @@ from .constants import (
     ADVERT_FLAG_IS_CHAT_NODE,
     ADVERT_FLAG_IS_REPEATER,
     ADVERT_FLAG_IS_ROOM_SERVER,
+    ADVERT_FLAG_IS_SENSOR,
     CIPHER_BLOCK_SIZE,
     CIPHER_MAC_SIZE,
     CONTACT_TYPE_CHAT_NODE,
@@ -71,7 +72,13 @@ from .packet_utils import (
     PacketValidationUtils,
     RouteTypeUtils,
 )
-from .transport_keys import calc_transport_code, get_auto_key_for
+from .transport_keys import (
+    TransportKey,
+    TransportKeyStore,
+    calc_transport_code,
+    derive_auto_key,
+    get_auto_key_for,
+)
 from .utils import decode_appdata, parse_advert_payload
 
 __all__ = [
@@ -136,6 +143,7 @@ __all__ = [
     "ADVERT_FLAG_IS_CHAT_NODE",
     "ADVERT_FLAG_IS_REPEATER",
     "ADVERT_FLAG_IS_ROOM_SERVER",
+    "ADVERT_FLAG_IS_SENSOR",
     "ADVERT_FLAG_HAS_LOCATION",
     "ADVERT_FLAG_HAS_FEATURE1",
     "ADVERT_FLAG_HAS_FEATURE2",
