@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Iterable, List, Optional
+import time
+from typing import Iterable, List, Optional, Sequence
 
 from ..protocol import (
     CONTACT_TYPE_CHAT_NODE,
@@ -30,6 +31,8 @@ class ContactRecord:
     last_advert: int = 0
     tags: set[str] = field(default_factory=set)
     permissions: ContactPermissions = field(default_factory=ContactPermissions)
+    out_path: List[int] = field(default_factory=list)
+    last_path_update: int = 0
 
     def src_hash(self) -> Optional[int]:
         try:
@@ -162,6 +165,8 @@ class ContactBook:
             longitude=contact.get("longitude", 0.0),
             latitude=contact.get("latitude", 0.0),
             last_advert=contact.get("last_advert", 0),
+            out_path=list(contact.get("out_path", []) or []),
+            last_path_update=contact.get("last_path_update", 0),
         )
 
     def _update_contact(self, dest: ContactRecord, src: ContactRecord) -> None:
@@ -175,6 +180,9 @@ class ContactBook:
             dest.tags.update(src.tags)
         if src.permissions != dest.permissions:
             dest.permissions = src.permissions
+        if src.out_path:
+            dest.out_path = list(src.out_path)
+            dest.last_path_update = src.last_path_update or dest.last_path_update
 
     def _apply_default_permissions(self, contact: ContactRecord, *, overwrite: bool = True) -> None:
         if overwrite:
@@ -202,3 +210,14 @@ class ContactBook:
         if isinstance(ref, int):
             return self.get_by_hash(ref)
         return self.get_by_public_key(ref)
+
+    # ------------------------------------------------------------------
+    # Path helpers
+    # ------------------------------------------------------------------
+    def update_out_path(self, contact: ContactRecord | str | int, path: Sequence[int]) -> Optional[ContactRecord]:
+        record = self._resolve_contact(contact)
+        if not record:
+            return None
+        record.out_path = list(path)
+        record.last_path_update = int(time.time())
+        return record

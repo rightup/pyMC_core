@@ -360,9 +360,30 @@ class TestAdvertHandler:
 class TestPathHandler:
     def setup_method(self):
         self.log_fn = MagicMock()
+        self.local_identity = LocalIdentity()
+        self.remote_identity = LocalIdentity()
+        self.contacts = ContactBook()
+        self.contact = self.contacts.add_contact(
+            {
+                "public_key": self.remote_identity.get_public_key().hex(),
+                "name": "peer",
+                "type": 1,
+            }
+        )
+        self.contacts.set_permissions(self.contact.public_key, allow_telemetry=True)
         self.ack_handler = AckHandler(self.log_fn)
-        self.protocol_response_handler = MagicMock()
-        self.handler = PathHandler(self.log_fn, self.ack_handler, self.protocol_response_handler)
+        self.received_crcs: list[int] = []
+        self.ack_handler.set_ack_received_callback(lambda crc: self.received_crcs.append(crc))
+        self.protocol_response_handler = ProtocolResponseHandler(
+            self.log_fn, self.local_identity, self.contacts
+        )
+        self.handler = PathHandler(
+            self.log_fn,
+            local_identity=self.local_identity,
+            contact_book=self.contacts,
+            ack_handler=self.ack_handler,
+            protocol_response_handler=self.protocol_response_handler,
+        )
 
     def test_payload_type(self):
         """Test path handler payload type."""
@@ -373,6 +394,56 @@ class TestPathHandler:
         assert self.handler._log == self.log_fn
         assert self.handler._ack_handler == self.ack_handler
         assert self.handler._protocol_response_handler == self.protocol_response_handler
+        assert self.handler._contact_book == self.contacts
+        assert self.handler._local_identity == self.local_identity
+
+    def _shared_secret(self) -> bytes:
+        return self.remote_identity.calc_shared_secret(self.local_identity.get_private_key())
+
+    def _build_path_packet(self, extra_type: int, extra_payload: bytes, path: list[int]):
+        return PacketBuilder.create_path_return(
+            dest_hash=self.local_identity.get_public_key()[0],
+            src_hash=self.remote_identity.get_public_key()[0],
+            secret=self._shared_secret(),
+            path=path,
+            extra_type=extra_type,
+            extra=extra_payload,
+        )
+
+    @pytest.mark.asyncio
+    async def test_path_handler_updates_path_and_notifies_ack(self):
+        path = [1, 2, 3]
+        crc = 0x11223344
+        packet = self._build_path_packet(PAYLOAD_TYPE_ACK, crc.to_bytes(4, "little"), path)
+
+        await self.handler(packet)
+
+        contact = self.contacts.get_by_public_key(self.remote_identity.get_public_key().hex())
+        assert contact is not None
+        assert contact.out_path == path
+        assert self.received_crcs == [crc]
+
+    @pytest.mark.asyncio
+    async def test_path_handler_forwards_protocol_responses(self):
+        captured = []
+        src_hash = self.remote_identity.get_public_key()[0]
+        self.protocol_response_handler.set_response_callback(
+            src_hash, lambda success, text, parsed: captured.append((success, text, parsed))
+        )
+
+        payload = b"mesh ok"
+        packet = self._build_path_packet(PAYLOAD_TYPE_RESPONSE, payload, [7, 8])
+
+        await self.handler(packet)
+
+        assert self.received_crcs == []
+        assert len(captured) == 1
+        success, text, parsed = captured[0]
+        assert success is True
+        assert text.startswith("Unknown telemetry")
+        assert parsed.get("type") == "telemetry"
+        contact = self.contacts.get_by_public_key(self.remote_identity.get_public_key().hex())
+        assert contact.out_path == [7, 8]
 
 
 # Group Text Handler Tests

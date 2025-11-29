@@ -218,7 +218,13 @@ class Dispatcher:
         self.telemetry_response_handler = protocol_response_handler
 
         # PATH handler - for route discovery packets, with ACK and protocol response processing
-        path_handler = PathHandler(self._log, ack_handler, protocol_response_handler)
+        path_handler = PathHandler(
+            self._log,
+            local_identity=local_identity,
+            contact_book=contacts,
+            ack_handler=ack_handler,
+            protocol_response_handler=protocol_response_handler,
+        )
         self.register_handler(PathHandler.payload_type(), path_handler)
 
         # Login response handler for PAYLOAD_TYPE_RESPONSE packets

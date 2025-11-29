@@ -89,6 +89,13 @@ class AckHandler(BaseHandler):
         Process PATH packets that may contain ACKs in different forms.
         Returns CRC if ACK found, None otherwise.
         """
+        inner = getattr(packet, "decrypted", {}).get("path_inner") if packet else None
+        if inner:
+            bundled_crc = await self._process_bundled_ack_in_path(inner)
+            if bundled_crc is not None:
+                self.log(f"Found bundled ACK in PATH payload: CRC={bundled_crc:08X}")
+                return bundled_crc
+
         if not self.dispatcher:
             return None
 
@@ -114,12 +121,6 @@ class AckHandler(BaseHandler):
                 self.log(f"Found encrypted ACK response: CRC={ack_crc:08X}")
                 return ack_crc
 
-        # Check for bundled ACKs in returned path messages
-        bundled_crc = await self._process_bundled_ack_in_path(payload)
-        if bundled_crc is not None:
-            self.log(f"Found bundled ACK: CRC={bundled_crc:08X}")
-            return bundled_crc
-
         return None
 
     async def _try_decrypt_encrypted_ack(self, payload: bytes) -> Optional[int]:
@@ -144,11 +145,9 @@ class AckHandler(BaseHandler):
             # Decrypt (skip dest_hash and src_hash)
             mac_and_ciphertext = payload[2:]
             decrypted = CryptoUtils.mac_then_decrypt(aes_key, shared_secret, mac_and_ciphertext)
-
             if not decrypted or len(decrypted) < 4:
                 return None
 
-            # Look for expected CRC in decrypted data
             expected_crcs = set(self.dispatcher._waiting_acks.keys())
             for i in range(len(decrypted) - 3):
                 crc_bytes = decrypted[i : i + 4]
@@ -167,7 +166,7 @@ class AckHandler(BaseHandler):
             return None
 
     async def _process_bundled_ack_in_path(self, payload: bytes) -> Optional[int]:
-        """Process bundled ACKs in returned path messages according to protocol spec."""
+        """Process bundled ACKs from already-decrypted PATH payloads."""
         if len(payload) < 1:
             return None
 
