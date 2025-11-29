@@ -151,14 +151,21 @@ class Packet:
         Extract the 4-bit payload type from the packet header.
 
         Returns:
-            int: Payload type value indicating the type of data in the packet:
-                - 0: Plain text message
-                - 1: Encrypted message
-                - 2: ACK packet
-                - 3: Advertisement
-                - 4: Login request/response
-                - 5: Protocol control
-                - 6-15: Reserved for future use
+            int: Payload type value (bits 2-5) describing the payload semantics:
+                - 0x00: `PAYLOAD_TYPE_REQ` (protocol requests)
+                - 0x01: `PAYLOAD_TYPE_RESPONSE` (login / protocol responses)
+                - 0x02: `PAYLOAD_TYPE_TXT_MSG` (direct text datagrams)
+                - 0x03: `PAYLOAD_TYPE_ACK` (delivery acknowledgements)
+                - 0x04: `PAYLOAD_TYPE_ADVERT` (node advertisements)
+                - 0x05: `PAYLOAD_TYPE_GRP_TXT` (group/channel text)
+                - 0x06: `PAYLOAD_TYPE_GRP_DATA` (channel binary data)
+                - 0x07: `PAYLOAD_TYPE_ANON_REQ` (anonymous requests/login)
+                - 0x08: `PAYLOAD_TYPE_PATH` (returned path + responses)
+                - 0x09: `PAYLOAD_TYPE_TRACE` (trace diagnostics)
+                - 0x0A: `PAYLOAD_TYPE_MULTIPART` (wrapper with inner payload)
+                - 0x0B: `PAYLOAD_TYPE_CONTROL` (discovery/control plane)
+                - 0x0F: `PAYLOAD_TYPE_RAW_CUSTOM` (vendor-specific)
+                Remaining values are reserved by MeshCore.
         """
         return (self.header >> PH_TYPE_SHIFT) & PH_TYPE_MASK
 
