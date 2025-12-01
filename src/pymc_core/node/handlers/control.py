@@ -6,7 +6,7 @@ These are zero-hop packets used for network topology discovery.
 
 import struct
 import time
-from typing import Any, Callable, Dict
+from typing import Any, Callable, Dict, Optional
 
 from ...protocol import Packet
 from ...protocol.constants import PAYLOAD_TYPE_CONTROL
@@ -59,37 +59,39 @@ class ControlHandler:
         """Clear callback for discovery requests."""
         self._request_callbacks.pop(0, None)
 
-    async def __call__(self, pkt: Packet) -> None:
-        """Handle incoming control packet."""
+    async def __call__(self, pkt: Packet) -> Optional[Dict[str, Any]]:
+        """Handle incoming control packet and return parsed data."""
         try:
             if not pkt.payload or len(pkt.payload) == 0:
                 self._log("[ControlHandler] Empty payload, ignoring")
-                return
+                return None
 
             # Check if this is a zero-hop packet (path_len must be 0)
             if pkt.path_len != 0:
                 self._log(
                     f"[ControlHandler] Non-zero path length ({pkt.path_len}), ignoring"
                 )
-                return
+                return None
 
             # Extract control type (upper 4 bits of first byte)
             control_type = pkt.payload[0] & 0xF0
 
             if control_type == CTL_TYPE_NODE_DISCOVER_REQ:
-                await self._handle_discovery_request(pkt)
+                return await self._handle_discovery_request(pkt)
             elif control_type == CTL_TYPE_NODE_DISCOVER_RESP:
-                await self._handle_discovery_response(pkt)
+                return await self._handle_discovery_response(pkt)
             else:
                 self._log(
                     f"[ControlHandler] Unknown control type: 0x{control_type:02X}"
                 )
+                return None
 
         except Exception as e:
             self._log(f"[ControlHandler] Error processing control packet: {e}")
+            return None
 
-    async def _handle_discovery_request(self, pkt: Packet) -> None:
-        """Handle node discovery request packet.
+    async def _handle_discovery_request(self, pkt: Packet) -> Optional[Dict[str, Any]]:
+        """Handle node discovery request packet and return parsed data.
         
         Expected format:
         - byte 0: type (0x80) + flags (bit 0: prefix_only)
@@ -100,7 +102,7 @@ class ControlHandler:
         try:
             if len(pkt.payload) < 6:
                 self._log("[ControlHandler] Discovery request too short")
-                return
+                return None
 
             # Parse request
             flags_byte = pkt.payload[0]
@@ -127,6 +129,7 @@ class ControlHandler:
                 "snr": pkt._snr,
                 "rssi": pkt._rssi,
                 "timestamp": time.time(),
+                "valid": True,
             }
 
             # Call request callback if registered (for logging/monitoring)
@@ -135,11 +138,14 @@ class ControlHandler:
                 if callback:
                     callback(request_data)
 
+            return request_data
+
         except Exception as e:
             self._log(f"[ControlHandler] Error handling discovery request: {e}")
+            return None
 
-    async def _handle_discovery_response(self, pkt: Packet) -> None:
-        """Handle node discovery response packet.
+    async def _handle_discovery_response(self, pkt: Packet) -> Optional[Dict[str, Any]]:
+        """Handle node discovery response packet and return parsed data.
         
         Response format:
         - byte 0: type (0x90) + node_type (lower 4 bits)
@@ -150,7 +156,7 @@ class ControlHandler:
         try:
             if len(pkt.payload) < 6:
                 self._log("[ControlHandler] Discovery response too short")
-                return
+                return None
 
             # Parse response
             type_byte = pkt.payload[0]
@@ -178,6 +184,7 @@ class ControlHandler:
                 "pub_key": pub_key.hex(),
                 "pub_key_bytes": bytes(pub_key),
                 "timestamp": time.time(),
+                "valid": True,
             }
 
             # Call callback if registered for this tag
@@ -192,6 +199,12 @@ class ControlHandler:
                 self._log(
                     f"[ControlHandler] No callback waiting for tag 0x{tag:08X}"
                 )
+
+            return response_data
+
+        except Exception as e:
+            self._log(f"[ControlHandler] Error handling discovery response: {e}")
+            return None
 
         except Exception as e:
             self._log(f"[ControlHandler] Error handling discovery response: {e}")
