@@ -553,7 +553,8 @@ class SX1262Radio(LoRaRadio):
                 # Set RX gain and TX power
                 self.lora.writeRegister(self.lora.REG_RX_GAIN, [self.lora.RX_GAIN_POWER_SAVING], 1)
                 # Use optimized setTxPower function for proper +30dBm PA configuration
-                self.set_tx_power(self.tx_power)
+                logger.info(f"Setting TX power to {self.tx_power} dBm during initialization")
+                self.lora.setTxPower(self.tx_power, self.lora.TX_POWER_SX1262)
 
                 # Configure modulation and packet parameters
                 # Enable LDRO if symbol duration > 16ms (SF11/62.5kHz = 32.768ms)
