@@ -574,12 +574,6 @@ class SX126x(BaseLoRa):
 
     def setTxPower(self, txPower: int, version=TX_POWER_SX1262):
         # -----------------------------
-        # PA-SAFETY for E22-900M30S
-        # -----------------------------
-        if version == self.TX_POWER_SX1262 and txPower > 18:
-            txPower = 18  # Prevent PA saturation (18 dBm → 30 dBm RF)
-
-        # -----------------------------
         # Chipset-specific hard limits
         # -----------------------------
         if txPower > 22:
@@ -599,15 +593,20 @@ class SX126x(BaseLoRa):
         # SX1262 (E22 modules)
         # =============================
         if version == self.TX_POWER_SX1262:
-            # Semtech mapping: -17 .. +22 → register value = txPower + 18
-            powerReg = txPower + 18
-
+            # Per datasheet 13.4.4: power parameter is in dBm directly
+            powerReg = txPower
+            
+            # Determine which PA to use based on requested power
             if txPower > 14:
+                # High power PA: -9 to +22 dBm
+                deviceSel = 0x01
                 paDutyCycle = 0x04
                 hpMax = 0x07
             else:
-                paDutyCycle = 0x00
-                hpMax = 0x00
+                # Low power PA: -17 to +14 dBm
+                deviceSel = 0x00
+                paDutyCycle = 0x02
+                hpMax = 0x03
 
         # =============================
         # SX1261
@@ -618,14 +617,16 @@ class SX126x(BaseLoRa):
             if txPower >= 14:
                 paDutyCycle = 0x04
                 hpMax = 0x00
-                powerReg = 0x0E
+                powerReg = 14  # Cap at max
             elif txPower >= 10:
                 paDutyCycle = 0x01
                 hpMax = 0x00
-                powerReg = 0x0D
+                powerReg = txPower
             else:
-                # Low-power SX1261 mode uses linear formula
-                powerReg = txPower + 18
+                # Low power mode
+                paDutyCycle = 0x00
+                hpMax = 0x00
+                powerReg = txPower
 
         # =============================
         # SX1268
@@ -634,32 +635,43 @@ class SX126x(BaseLoRa):
             if txPower >= 14:
                 paDutyCycle = 0x04
                 hpMax = 0x06
-                powerReg = 0x0F
+                powerReg = txPower
+                deviceSel = 0x01  # High power PA
             elif txPower >= 10:
                 paDutyCycle = 0x00
                 hpMax = 0x03
-                powerReg = 0x0F
+                powerReg = txPower
+                deviceSel = 0x00  # Low power PA
             else:
-                powerReg = txPower + 18
+                paDutyCycle = 0x00
+                hpMax = 0x00
+                powerReg = txPower
+                deviceSel = 0x00
 
         # =============================
-        # Unknown version (preserve prev old logic)
+        # Unknown version (fallback)
         # =============================
         else:
             if txPower == 22:
                 paDutyCycle = 0x04
                 hpMax = 0x07
-                powerReg = 0x16
+                deviceSel = 0x01
+                powerReg = 22
             elif txPower >= 20:
                 paDutyCycle = 0x03
                 hpMax = 0x05
-                powerReg = 0x16
+                deviceSel = 0x01
+                powerReg = txPower
             elif txPower >= 17:
                 paDutyCycle = 0x02
                 hpMax = 0x03
-                powerReg = 0x16
+                deviceSel = 0x01
+                powerReg = txPower
             else:
-                powerReg = txPower + 18
+                paDutyCycle = 0x00
+                hpMax = 0x00
+                deviceSel = 0x00
+                powerReg = txPower
 
         # =============================
         # APPLY FINAL CONFIG
