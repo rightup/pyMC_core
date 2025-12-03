@@ -595,18 +595,33 @@ class SX126x(BaseLoRa):
         if version == self.TX_POWER_SX1262:
             # Per datasheet 13.4.4: power parameter is in dBm directly
             powerReg = txPower
-            
-            # Determine which PA to use based on requested power
-            if txPower > 14:
-                # High power PA: -9 to +22 dBm
+
+            # Determine PA configuration based on requested power (Table 13-18)
+            if txPower >= 22:
+                # Maximum power: +22 dBm
                 deviceSel = 0x01
                 paDutyCycle = 0x04
                 hpMax = 0x07
+            elif txPower >= 20:
+                # High power: +20 dBm
+                deviceSel = 0x01
+                paDutyCycle = 0x03
+                hpMax = 0x05
+            elif txPower >= 17:
+                # Medium-high power: +17 dBm
+                deviceSel = 0x01
+                paDutyCycle = 0x02
+                hpMax = 0x03
+            elif txPower >= 15:
+                # Medium power: +15 dBm (still use HP PA for better efficiency)
+                deviceSel = 0x01
+                paDutyCycle = 0x01
+                hpMax = 0x01
             else:
                 # Low power PA: -17 to +14 dBm
                 deviceSel = 0x00
-                paDutyCycle = 0x02
-                hpMax = 0x03
+                paDutyCycle = 0x01
+                hpMax = 0x01
 
         # =============================
         # SX1261
