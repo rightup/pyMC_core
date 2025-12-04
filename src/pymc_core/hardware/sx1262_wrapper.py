@@ -746,12 +746,8 @@ class SX1262Radio(LoRaRadio):
                 logger.debug(f"CAD check failed: {e}, proceeding with transmission")
                 break
 
-        # Set TXEN/RXEN pins for TX mode
+        # Set TXEN/RXEN pins for TX mode (matching RadioLib timing)
         self._control_tx_rx_pins(tx_mode=True)
-
-        # Critical timing: Give external PA time to enable before SetTx
-        # E22-900M30S requires TXEN to be HIGH for ~1-2ms before transmission
-        await asyncio.sleep(0.002)  # 2ms delay for external PA stabilization
 
         # Check busy status before starting transmission
         if self.lora.busyCheck():
