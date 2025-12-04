@@ -581,6 +581,8 @@ class SX1262Radio(LoRaRadio):
                 rx_mask = self._get_rx_irq_mask()
                 self.lora.setDioIrqParams(rx_mask, rx_mask, self.lora.IRQ_NONE, self.lora.IRQ_NONE)
                 self.lora.clearIrqStatus(0xFFFF)
+                # Configure RX gain for maximum sensitivity (boosted mode)
+                self.lora.setRxGain(self.lora.RX_GAIN_BOOSTED)
 
             # Program custom CAD thresholds to chip hardware if available
             if self._custom_cad_peak is not None and self._custom_cad_min is not None:
@@ -746,6 +748,10 @@ class SX1262Radio(LoRaRadio):
 
         # Set TXEN/RXEN pins for TX mode
         self._control_tx_rx_pins(tx_mode=True)
+
+        # Critical timing: Give external PA time to enable before SetTx
+        # E22-900M30S requires TXEN to be HIGH for ~1-2ms before transmission
+        await asyncio.sleep(0.002)  # 2ms delay for external PA stabilization
 
         # Check busy status before starting transmission
         if self.lora.busyCheck():
@@ -936,6 +942,12 @@ class SX1262Radio(LoRaRadio):
                 # Setup TX interrupts AFTER CAD checks (CAD changes interrupt config)
                 self._setup_tx_interrupts()
                 await asyncio.sleep(self.RADIO_TIMING_DELAY)
+
+                # Ensure PA configuration is correct before transmission
+                # Re-apply power settings to guarantee proper external
+                # PA operation think cad might be reseting
+                logger.debug(f"Re-applying TX power {self.tx_power} dBm before transmission")
+                self.lora.setTxPower(self.tx_power, self.lora.TX_POWER_SX1262)
 
                 # Execute the transmission
                 if not await self._execute_transmission(driver_timeout):
