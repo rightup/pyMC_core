@@ -508,7 +508,7 @@ class SX1262Radio(LoRaRadio):
                 # Reset RF module and set to standby
                 if not self._basic_radio_setup(use_busy_check=True):
                     return False
-
+                self.lora._fixResistanceAntenna()
                 # Configure TCXO, regulator, calibration and RF switch
                 if self.use_dio3_tcxo:
                     # Map voltage to DIO3 constants following Meshtastic pattern
