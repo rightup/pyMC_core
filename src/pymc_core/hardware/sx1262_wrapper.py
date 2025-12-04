@@ -52,7 +52,7 @@ class SX1262Radio(LoRaRadio):
         sync_word: int = 0x3444,
         is_waveshare: bool = False,
         use_dio3_tcxo: bool = False,
-        dio3_tcxo_voltage: float = 2.2,
+        dio3_tcxo_voltage: float = 1.8,
     ):
         """
         Initialize SX1262 radio
