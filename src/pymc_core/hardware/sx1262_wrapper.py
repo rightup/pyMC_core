@@ -545,7 +545,7 @@ class SX1262Radio(LoRaRadio):
 
                 self.lora.setRegulatorMode(self.lora.REGULATOR_DC_DC)
                 self.lora.calibrate(0x7F)
-                self.lora.setDio2RfSwitch()
+                self.lora.setDio2RfSwitch(False)
 
                 # Set packet type and frequency
                 rfFreq = int(self.frequency * 33554432 / 32000000)
