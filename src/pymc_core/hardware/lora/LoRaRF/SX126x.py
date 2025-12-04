@@ -596,31 +596,14 @@ class SX126x(BaseLoRa):
             # Per datasheet 13.4.4: power parameter is in dBm directly
             powerReg = txPower
 
-            if txPower >= 22:
-                # Maximum power: +22 dBm (for E22: 22dBm chip → 30dBm module via YP2233W PA)
-                deviceSel = 0x00  # SX1262 HP PA
-                paDutyCycle = 0x04
-                hpMax = 0x07
-            elif txPower >= 20:
-                # High power: +20 dBm
-                deviceSel = 0x00  # SX1262 HP PA
-                paDutyCycle = 0x03
-                hpMax = 0x05
-            elif txPower >= 17:
-                # Medium-high power: +17 dBm
-                deviceSel = 0x00  # SX1262 HP PA
-                paDutyCycle = 0x02
-                hpMax = 0x03
-            elif txPower >= 14:
-                # Medium power: +14 dBm (still use HP PA for better efficiency)
-                deviceSel = 0x00  # SX1262 HP PA
-                paDutyCycle = 0x02
-                hpMax = 0x02
-            else:
-                # Low power PA: -17 to +13 dBm
-                deviceSel = 0x00  # SX1262 LP PA
-                paDutyCycle = 0x01
-                hpMax = 0x01
+
+            # Matches RadioLib's SX1262::setOutputPower() implementation
+            deviceSel = 0x00      # SX1262 PA (0x00 for SX1262, 0x01 for SX1261)
+            paDutyCycle = 0x04    # Optimal duty cycle for high power
+            hpMax = 0x07          # Maximum clamping level (allows full +22 dBm)
+            
+            # Note: For E22-900M30S modules, 22 dBm from SX1262 chip
+            #       → ~30 dBm (1W) output via external YP2233W PA
 
         # =============================
         # SX1261
