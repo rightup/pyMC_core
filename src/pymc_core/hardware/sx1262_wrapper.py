@@ -495,8 +495,9 @@ class SX1262Radio(LoRaRadio):
                     False,  # IQ standard
                 )
 
-                self.lora.setPaConfig(0x02, 0x03, 0x00, 0x01)
-                self.lora.setTxParams(self.tx_power, self.lora.PA_RAMP_200U)
+                # Use RadioLib-compatible PA configuration and optimized setTxPower
+                # This automatically configures PA based on requested power level
+                self.lora.setTxPower(self.tx_power, self.lora.TX_POWER_SX1262)
 
                 # Configure RX interrupts (critical for RX functionality!)
                 rx_mask = self._get_rx_irq_mask()
@@ -552,7 +553,8 @@ class SX1262Radio(LoRaRadio):
 
                 # Set RX gain and TX power
                 self.lora.writeRegister(self.lora.REG_RX_GAIN, [self.lora.RX_GAIN_POWER_SAVING], 1)
-                # Use optimized setTxPower function for proper +30dBm PA configuration
+                # Use setTxPower for automatic PA configuration based on power level
+                # For E22 modules: 22 dBm from SX1262 → ~30 dBm (1W) via external YP2233W PA
                 logger.info(f"Setting TX power to {self.tx_power} dBm during initialization")
                 self.lora.setTxPower(self.tx_power, self.lora.TX_POWER_SX1262)
 
