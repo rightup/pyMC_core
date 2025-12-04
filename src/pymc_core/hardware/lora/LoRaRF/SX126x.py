@@ -596,6 +596,14 @@ class SX126x(BaseLoRa):
             # Per datasheet 13.4.4: power parameter is in dBm directly
             powerReg = txPower
 
+            # Configure OCP (Over Current Protection) for high power only
+            # For high power (≥20 dBm), need 140 mA current limit
+            # For lower power, leave chip default (matches RadioLib behavior)
+            if txPower >= 20:
+                # High power: Set OCP to 140 mA
+                # Formula: I_max = 2.5 * (OCP + 1) mA
+                # 0x38 = 56 decimal → (56 + 1) * 2.5 = 142.5 mA
+                self.setCurrentProtection(0x38)  # 140 mA
 
             # Matches RadioLib's SX1262::setOutputPower() implementation
             deviceSel = 0x00      # SX1262 PA (0x00 for SX1262, 0x01 for SX1261)
