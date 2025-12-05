@@ -606,10 +606,10 @@ class SX126x(BaseLoRa):
                 self.setCurrentProtection(0x38)  # 140 mA
 
             # Matches RadioLib's SX1262::setOutputPower() implementation
-            deviceSel = 0x00      # SX1262 PA (0x00 for SX1262, 0x01 for SX1261)
-            paDutyCycle = 0x04    # Optimal duty cycle for high power
-            hpMax = 0x07          # Maximum clamping level (allows full +22 dBm)
-            
+            deviceSel = 0x00  # SX1262 PA (0x00 for SX1262, 0x01 for SX1261)
+            paDutyCycle = 0x04  # Optimal duty cycle for high power
+            hpMax = 0x07  # Maximum clamping level (allows full +22 dBm)
+
             # Note: For E22-900M30S modules, 22 dBm from SX1262 chip
             #       → ~30 dBm (1W) output via external YP2233W PA
 
@@ -682,7 +682,7 @@ class SX126x(BaseLoRa):
         # APPLY FINAL CONFIG
         # =============================
         self.setPaConfig(paDutyCycle, hpMax, deviceSel, paLut)
-        self.setTxParams(powerReg, self.PA_RAMP_200U)
+        self.setTxParams(powerReg, self.PA_RAMP_40U)
 
     def setRxGain(self, rxGain):
         # set power saving or boosted gain in register
