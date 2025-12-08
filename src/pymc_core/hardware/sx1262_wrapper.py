@@ -216,6 +216,9 @@ class SX1262Radio(LoRaRadio):
             irqStat = self.lora.getIrqStatus()
             logger.debug(f"Interrupt IRQ status: 0x{irqStat:04X}")
 
+            if irqStat != 0:
+                self.lora.clearIrqStatus(irqStat)
+
             # Log specific interrupt types for debugging
             if irqStat & self.lora.IRQ_TX_DONE:
                 logger.debug("[TX] TX_DONE interrupt (0x{:04X})".format(self.lora.IRQ_TX_DONE))
