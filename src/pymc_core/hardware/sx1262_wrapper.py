@@ -212,7 +212,12 @@ class SX1262Radio(LoRaRadio):
 
             # Read IRQ status and handle
             irqStat = self.lora.getIrqStatus()
-            logger.debug(f"Interrupt IRQ status: 0x{irqStat:04X}")
+            
+            # Log ALL interrupts to diagnose spurious triggers in quiet environment
+            if irqStat == 0:
+                logger.warning(f"[IRQ] Spurious interrupt - IRQ status is 0x0000 (no flags set)")
+            else:
+                logger.debug(f"Interrupt IRQ status: 0x{irqStat:04X}")
             
             self.lora.clearIrqStatus(irqStat if irqStat != 0 else 0xFFFF)
 
@@ -356,16 +361,6 @@ class SX1262Radio(LoRaRadio):
                             logger.warning("[RX] CRC error detected")
                         elif irqStat & self.lora.IRQ_TIMEOUT:
                             logger.warning("[RX] RX timeout detected")
-                        elif irqStat & self.lora.IRQ_PREAMBLE_DETECTED:
-                            pass
-                        elif irqStat & self.lora.IRQ_SYNC_WORD_VALID:
-                            pass  # Sync word valid - receiving packet data...
-                        elif irqStat & self.lora.IRQ_HEADER_VALID:
-                            pass  # Header valid - packet header received, payload coming...
-                        elif irqStat & self.lora.IRQ_HEADER_ERR:
-                            pass  # Header error - corrupted header, packet dropped
-                        else:
-                            pass  # Other RX interrupt
 
                         # Always restore RX continuous mode after processing any interrupt
                         # This ensures the radio stays ready for the next packet
