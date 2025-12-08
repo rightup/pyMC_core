@@ -212,9 +212,6 @@ class SX1262Radio(LoRaRadio):
 
             # Read IRQ status and handle
             irqStat = self.lora.getIrqStatus()
-            
-            
-            self.lora.clearIrqStatus(irqStat if irqStat != 0 else 0xFFFF)
 
             # Log specific interrupt types for debugging
             if irqStat & self.lora.IRQ_TX_DONE:
@@ -1215,7 +1212,6 @@ class SX1262Radio(LoRaRadio):
                 detected = bool(irq & self.lora.IRQ_CAD_DETECTED)
                 cad_done = bool(irq & self.lora.IRQ_CAD_DONE)
 
-                # Only warn if status is non-zero (0x0000 means already cleared by interrupt handler)
                 if not cad_done and irq != 0:
                     logger.warning("CAD interrupt received but CAD_DONE flag not set")
 
