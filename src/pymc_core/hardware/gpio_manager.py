@@ -187,8 +187,8 @@ class GPIOPinManager:
             
             while not stop_event.is_set() and pin_number in self._pins:
                 try:
-                    # Wait for edge event with timeout
-                    event = gpio.poll(1.0)
+                    # Wait for edge event with timeout (longer timeout reduces CPU usage)
+                    event = gpio.poll(10.0)
                     
                     if event and not stop_event.is_set():
                         # Read the pin state to consume the edge event
