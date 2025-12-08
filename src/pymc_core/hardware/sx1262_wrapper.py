@@ -130,6 +130,9 @@ class SX1262Radio(LoRaRadio):
         self._rx_done_event = asyncio.Event()
         self._cad_event = asyncio.Event()
 
+        # Store last IRQ status for background task
+        self._last_irq_status = 0
+
         # Custom CAD thresholds (None means use defaults)
         self._custom_cad_peak = None
         self._custom_cad_min = None
@@ -155,13 +158,15 @@ class SX1262Radio(LoRaRadio):
         self.rx_callback = None
 
     def _get_rx_irq_mask(self) -> int:
-        """Get the standard RX interrupt mask - only actionable interrupts"""
+        """Get the standard RX interrupt mask"""
         return (
             self.lora.IRQ_RX_DONE
             | self.lora.IRQ_CRC_ERR
             | self.lora.IRQ_TIMEOUT
-            # Removed intermediate progress interrupts that don't require action:
-            # IRQ_PREAMBLE_DETECTED, IRQ_SYNC_WORD_VALID, IRQ_HEADER_VALID, IRQ_HEADER_ERR
+            | self.lora.IRQ_PREAMBLE_DETECTED
+            | self.lora.IRQ_SYNC_WORD_VALID
+            | self.lora.IRQ_HEADER_VALID
+            | self.lora.IRQ_HEADER_ERR
         )
 
     def _get_tx_irq_mask(self) -> int:
@@ -213,12 +218,19 @@ class SX1262Radio(LoRaRadio):
             # Read IRQ status and handle
             irqStat = self.lora.getIrqStatus()
 
-            # Log specific interrupt types for debugging
+            # Clear ALL interrupts immediately to prevent interrupt storms
+            if irqStat != 0:
+                self.lora.clearIrqStatus(irqStat)
+
+            # Store the status for the background task to read
+            self._last_irq_status = irqStat
+
+            # Handle TX_DONE
             if irqStat & self.lora.IRQ_TX_DONE:
                 logger.debug("[TX] TX_DONE interrupt (0x{:04X})".format(self.lora.IRQ_TX_DONE))
                 self._tx_done_event.set()
 
-            # Check for CAD interrupts (needed for LBT)
+            # Handle CAD interrupts
             if irqStat & (self.lora.IRQ_CAD_DETECTED | self.lora.IRQ_CAD_DONE):
                 cad_detected = bool(irqStat & self.lora.IRQ_CAD_DETECTED)
                 cad_done = bool(irqStat & self.lora.IRQ_CAD_DONE)
@@ -228,7 +240,7 @@ class SX1262Radio(LoRaRadio):
                 if hasattr(self, "_cad_event"):
                     self._cad_event.set()
 
-            # Handle RX interrupts normally - no filtering needed since they're disabled during TX
+            # Handle RX interrupts
             rx_interrupts = self._get_rx_irq_mask()
             if irqStat & self.lora.IRQ_RX_DONE:
                 logger.debug("[RX] RX_DONE interrupt (0x{:04X})".format(self.lora.IRQ_RX_DONE))
@@ -305,14 +317,11 @@ class SX1262Radio(LoRaRadio):
                     self._last_packet_activity = time.time()
 
                     try:
-                        # Read and process the received packet
-                        irqStat = self.lora.getIrqStatus()
+                        # Use the IRQ status stored by the interrupt handler
+                        irqStat = self._last_irq_status
                         logger.debug(f"[RX] IRQ Status: 0x{irqStat:04X}")
 
-                        # Clear ALL interrupt flags immediately to prevent duplicate processing
-                        if irqStat != 0:
-                            self.lora.clearIrqStatus(irqStat)
-
+                        # IRQ already cleared by interrupt handler, just process the packet
                         if irqStat & self.lora.IRQ_RX_DONE:
                             (
                                 payloadLengthRx,
@@ -353,6 +362,16 @@ class SX1262Radio(LoRaRadio):
                             logger.warning("[RX] CRC error detected")
                         elif irqStat & self.lora.IRQ_TIMEOUT:
                             logger.warning("[RX] RX timeout detected")
+                        elif irqStat & self.lora.IRQ_PREAMBLE_DETECTED:
+                            pass
+                        elif irqStat & self.lora.IRQ_SYNC_WORD_VALID:
+                            pass  # Sync word valid - receiving packet data...
+                        elif irqStat & self.lora.IRQ_HEADER_VALID:
+                            pass  # Header valid - packet header received, payload coming...
+                        elif irqStat & self.lora.IRQ_HEADER_ERR:
+                            pass  # Header error - corrupted header, packet dropped
+                        else:
+                            pass  # Other RX interrupt
 
                         # Always restore RX continuous mode after processing any interrupt
                         # This ensures the radio stays ready for the next packet
@@ -849,8 +868,7 @@ class SX1262Radio(LoRaRadio):
             pass  # Success
         elif irqStat & self.lora.IRQ_TIMEOUT:
             logger.warning("TX_TIMEOUT interrupt received - transmission failed")
-        elif irqStat != 0:
-            # Only warn if status is non-zero (0x0000 means already cleared by interrupt handler)
+        else:
             logger.warning(f"Unexpected interrupt status: 0x{irqStat:04X}")
 
         # Get transmission stats if available
@@ -1212,7 +1230,7 @@ class SX1262Radio(LoRaRadio):
                 detected = bool(irq & self.lora.IRQ_CAD_DETECTED)
                 cad_done = bool(irq & self.lora.IRQ_CAD_DONE)
 
-                if not cad_done and irq != 0:
+                if not cad_done:
                     logger.warning("CAD interrupt received but CAD_DONE flag not set")
 
                 if calibration:
