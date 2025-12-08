@@ -205,8 +205,8 @@ class SX1262Radio(LoRaRadio):
         return True
 
     def _handle_interrupt(self):
-        """Simple instance method interrupt handler"""
-        logger.debug("Interrupt handler called!")
+        """instance method interrupt handler"""
+
         try:
             if not self._initialized or not self.lora:
                 logger.warning("Interrupt called but radio not initialized")
@@ -864,7 +864,8 @@ class SX1262Radio(LoRaRadio):
             pass  # Success
         elif irqStat & self.lora.IRQ_TIMEOUT:
             logger.warning("TX_TIMEOUT interrupt received - transmission failed")
-        else:
+        elif irqStat != 0:
+            # Only warn if status is non-zero (0x0000 means already cleared by interrupt handler)
             logger.warning(f"Unexpected interrupt status: 0x{irqStat:04X}")
 
         # Get transmission stats if available
@@ -1226,7 +1227,8 @@ class SX1262Radio(LoRaRadio):
                 detected = bool(irq & self.lora.IRQ_CAD_DETECTED)
                 cad_done = bool(irq & self.lora.IRQ_CAD_DONE)
 
-                if not cad_done:
+                # Only warn if status is non-zero (0x0000 means already cleared by interrupt handler)
+                if not cad_done and irq != 0:
                     logger.warning("CAD interrupt received but CAD_DONE flag not set")
 
                 if calibration:
