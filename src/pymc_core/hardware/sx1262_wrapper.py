@@ -869,7 +869,8 @@ class SX1262Radio(LoRaRadio):
         elif irqStat & self.lora.IRQ_TIMEOUT:
             logger.warning("TX_TIMEOUT interrupt received - transmission failed")
         else:
-            logger.warning(f"Unexpected interrupt status: 0x{irqStat:04X}")
+            # No warning for 0x0000 - interrupt already cleared by handler
+            pass
 
         # Get transmission stats if available
         try:
