@@ -155,15 +155,13 @@ class SX1262Radio(LoRaRadio):
         self.rx_callback = None
 
     def _get_rx_irq_mask(self) -> int:
-        """Get the standard RX interrupt mask"""
+        """Get the standard RX interrupt mask - only actionable interrupts"""
         return (
             self.lora.IRQ_RX_DONE
             | self.lora.IRQ_CRC_ERR
             | self.lora.IRQ_TIMEOUT
-            | self.lora.IRQ_PREAMBLE_DETECTED
-            | self.lora.IRQ_SYNC_WORD_VALID
-            | self.lora.IRQ_HEADER_VALID
-            | self.lora.IRQ_HEADER_ERR
+            # Removed intermediate progress interrupts that don't require action:
+            # IRQ_PREAMBLE_DETECTED, IRQ_SYNC_WORD_VALID, IRQ_HEADER_VALID, IRQ_HEADER_ERR
         )
 
     def _get_tx_irq_mask(self) -> int:
