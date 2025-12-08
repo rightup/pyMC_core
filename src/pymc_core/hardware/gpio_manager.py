@@ -191,6 +191,8 @@ class GPIOPinManager:
                     event = gpio.poll(1.0)
                     
                     if event and not stop_event.is_set():
+                        gpio.read()
+                        
                         callback = self._input_callbacks.get(pin_number)
                         if callback:
                             try:
