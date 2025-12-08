@@ -213,11 +213,6 @@ class SX1262Radio(LoRaRadio):
             # Read IRQ status and handle
             irqStat = self.lora.getIrqStatus()
             
-            # Log ALL interrupts to diagnose spurious triggers in quiet environment
-            if irqStat == 0:
-                logger.warning(f"[IRQ] Spurious interrupt - IRQ status is 0x0000 (no flags set)")
-            else:
-                logger.debug(f"Interrupt IRQ status: 0x{irqStat:04X}")
             
             self.lora.clearIrqStatus(irqStat if irqStat != 0 else 0xFFFF)
 
