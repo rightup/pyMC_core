@@ -1231,9 +1231,6 @@ class SX1262Radio(LoRaRadio):
                 detected = bool(irq & self.lora.IRQ_CAD_DETECTED)
                 cad_done = bool(irq & self.lora.IRQ_CAD_DONE)
 
-                if not cad_done:
-                    logger.warning("CAD interrupt received but CAD_DONE flag not set")
-
                 if calibration:
                     return {
                         "sf": self.spreading_factor,
