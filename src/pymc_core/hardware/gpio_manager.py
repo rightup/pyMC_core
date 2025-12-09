@@ -7,7 +7,6 @@ Works on Raspberry Pi, Orange Pi, Luckfox, and other Linux SBCs
 import logging
 import glob
 import threading
-import time
 from typing import Callable, Optional, Dict
 
 from periphery import GPIO
