@@ -573,57 +573,116 @@ class SX126x(BaseLoRa):
         self.setRfFrequency(rfFreq)
 
     def setTxPower(self, txPower: int, version=TX_POWER_SX1262):
-        #  maximum TX power is 22 dBm and 15 dBm for SX1261
+        # -----------------------------
+        # Chipset-specific hard limits
+        # -----------------------------
         if txPower > 22:
             txPower = 22
-        elif txPower > 15 and version == self.TX_POWER_SX1261:
+        if version == self.TX_POWER_SX1261 and txPower > 15:
             txPower = 15
+        if txPower < -17:
+            txPower = -17
 
+        # Default configuration
         paDutyCycle = 0x00
         hpMax = 0x00
         deviceSel = 0x00
-        power = 0x0E
-        if version == self.TX_POWER_SX1261:
-            deviceSel = 0x01
-        # set parameters for PA config and TX params configuration
-        if txPower == 22:
-            paDutyCycle = 0x04
-            hpMax = 0x07
-            power = 0x16
-        elif txPower >= 20:
-            paDutyCycle = 0x03
-            hpMax = 0x05
-            power = 0x16
-        elif txPower >= 17:
-            paDutyCycle = 0x02
-            hpMax = 0x03
-            power = 0x16
-        elif txPower >= 14 and version == self.TX_POWER_SX1261:
-            paDutyCycle = 0x04
-            hpMax = 0x00
-            power = 0x0E
-        elif txPower >= 14 and version == self.TX_POWER_SX1262:
-            paDutyCycle = 0x02
-            hpMax = 0x02
-            power = 0x16
-        elif txPower >= 14 and version == self.TX_POWER_SX1268:
-            paDutyCycle = 0x04
-            hpMax = 0x06
-            power = 0x0F
-        elif txPower >= 10 and version == self.TX_POWER_SX1261:
-            paDutyCycle = 0x01
-            hpMax = 0x00
-            power = 0x0D
-        elif txPower >= 10 and version == self.TX_POWER_SX1268:
-            paDutyCycle = 0x00
-            hpMax = 0x03
-            power = 0x0F
-        else:
-            return
+        paLut = 0x01
 
-        # set power amplifier and TX power configuration
-        self.setPaConfig(paDutyCycle, hpMax, deviceSel, 0x01)
-        self.setTxParams(power, self.PA_RAMP_800U)
+        # =============================
+        # SX1262 (E22 modules)
+        # =============================
+        if version == self.TX_POWER_SX1262:
+            # Per datasheet 13.4.4: power parameter is in dBm directly
+            powerReg = txPower
+
+            # Configure OCP (Over Current Protection) for high power only
+            # For high power (≥20 dBm), need 140 mA current limit
+            # For lower power, leave chip default (matches RadioLib behavior)
+            if txPower >= 20:
+                # High power: Set OCP to 140 mA
+                # Formula: I_max = 2.5 * (OCP + 1) mA
+                # 0x38 = 56 decimal → (56 + 1) * 2.5 = 142.5 mA
+                self.setCurrentProtection(0x38)  # 140 mA
+
+            # Matches RadioLib's SX1262::setOutputPower() implementation
+            deviceSel = 0x00  # SX1262 PA (0x00 for SX1262, 0x01 for SX1261)
+            paDutyCycle = 0x04  # Optimal duty cycle for high power
+            hpMax = 0x07  # Maximum clamping level (allows full +22 dBm)
+
+            # Note: For E22-900M30S modules, 22 dBm from SX1262 chip
+            #       → ~30 dBm (1W) output via external YP2233W PA
+
+        # =============================
+        # SX1261
+        # =============================
+        elif version == self.TX_POWER_SX1261:
+            deviceSel = 0x01
+
+            if txPower >= 14:
+                paDutyCycle = 0x04
+                hpMax = 0x00
+                powerReg = 14  # Cap at max
+            elif txPower >= 10:
+                paDutyCycle = 0x01
+                hpMax = 0x00
+                powerReg = txPower
+            else:
+                # Low power mode
+                paDutyCycle = 0x00
+                hpMax = 0x00
+                powerReg = txPower
+
+        # =============================
+        # SX1268
+        # =============================
+        elif version == self.TX_POWER_SX1268:
+            if txPower >= 14:
+                paDutyCycle = 0x04
+                hpMax = 0x06
+                powerReg = txPower
+                deviceSel = 0x01  # High power PA
+            elif txPower >= 10:
+                paDutyCycle = 0x00
+                hpMax = 0x03
+                powerReg = txPower
+                deviceSel = 0x00  # Low power PA
+            else:
+                paDutyCycle = 0x00
+                hpMax = 0x00
+                powerReg = txPower
+                deviceSel = 0x00
+
+        # =============================
+        # Unknown version (fallback)
+        # =============================
+        else:
+            if txPower == 22:
+                paDutyCycle = 0x04
+                hpMax = 0x07
+                deviceSel = 0x01
+                powerReg = 22
+            elif txPower >= 20:
+                paDutyCycle = 0x03
+                hpMax = 0x05
+                deviceSel = 0x01
+                powerReg = txPower
+            elif txPower >= 17:
+                paDutyCycle = 0x02
+                hpMax = 0x03
+                deviceSel = 0x01
+                powerReg = txPower
+            else:
+                paDutyCycle = 0x00
+                hpMax = 0x00
+                deviceSel = 0x00
+                powerReg = txPower
+
+        # =============================
+        # APPLY FINAL CONFIG
+        # =============================
+        self.setPaConfig(paDutyCycle, hpMax, deviceSel, paLut)
+        self.setTxParams(powerReg, self.PA_RAMP_40U)
 
     def setRxGain(self, rxGain):
         # set power saving or boosted gain in register

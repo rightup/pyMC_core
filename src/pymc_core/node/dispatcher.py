@@ -156,7 +156,7 @@ class Dispatcher:
         # Register all the standard handlers
         self.register_handler(
             AdvertHandler.payload_type(),
-            AdvertHandler(contacts, self._log, local_identity, event_service),
+            AdvertHandler(self._log),
         )
         self.register_handler(AckHandler.payload_type(), ack_handler)
 

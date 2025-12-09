@@ -1,4 +1,5 @@
 from abc import ABC, abstractmethod
+from typing import Any, Optional
 
 
 class BaseHandler(ABC):
@@ -9,5 +10,5 @@ class BaseHandler(ABC):
         pass
 
     @abstractmethod
-    async def __call__(self, packet):
+    async def __call__(self, packet) -> Optional[Any]:
         pass

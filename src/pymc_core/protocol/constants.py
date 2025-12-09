@@ -63,7 +63,7 @@ TIMESTAMP_SIZE = 4  # 4 bytes for a timestamp (32-bit unsigned int)
 # Node Advert Flags (bitfield values)
 ADVERT_FLAG_IS_CHAT_NODE = 0x01
 ADVERT_FLAG_IS_REPEATER = 0x02
-ADVERT_FLAG_IS_ROOM_SERVER = 0x04
+ADVERT_FLAG_IS_ROOM_SERVER = 0x03
 ADVERT_FLAG_HAS_LOCATION = 0x10
 ADVERT_FLAG_HAS_FEATURE1 = 0x20
 ADVERT_FLAG_HAS_FEATURE2 = 0x40
@@ -73,12 +73,18 @@ ADVERT_FLAG_HAS_NAME = 0x80
 def describe_advert_flags(flags: int) -> str:
     labels = []
 
-    if flags & ADVERT_FLAG_IS_CHAT_NODE:
+    # Extract node type from bits 0-3
+    node_type = flags & 0x0F
+    if node_type == ADVERT_FLAG_IS_CHAT_NODE:
         labels.append("is chat node")
-    if flags & ADVERT_FLAG_IS_REPEATER:
+    elif node_type == ADVERT_FLAG_IS_REPEATER:
         labels.append("is repeater")
-    if flags & ADVERT_FLAG_IS_ROOM_SERVER:
+    elif node_type == ADVERT_FLAG_IS_ROOM_SERVER:
         labels.append("is room server")
+    elif node_type == 0x04:
+        labels.append("is sensor")
+
+    # Check feature flags (bits 4-7)
     if flags & ADVERT_FLAG_HAS_LOCATION:
         labels.append("has location")
     if flags & ADVERT_FLAG_HAS_FEATURE1:

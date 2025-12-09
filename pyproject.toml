@@ -35,8 +35,7 @@ dependencies = [
 [project.optional-dependencies]
 radio = ["pyserial>=3.5"]
 hardware = [
-    "gpiozero>=2.0.0",
-    "lgpio>=0.2.0",
+    "python-periphery>=2.4.1",
     "spidev>=3.5",
     "pyserial>=3.5",
 ]

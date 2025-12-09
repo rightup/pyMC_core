@@ -130,6 +130,9 @@ class SX1262Radio(LoRaRadio):
         self._rx_done_event = asyncio.Event()
         self._cad_event = asyncio.Event()
 
+        # Store last IRQ status for background task
+        self._last_irq_status = 0
+
         # Custom CAD thresholds (None means use defaults)
         self._custom_cad_peak = None
         self._custom_cad_min = None
@@ -205,8 +208,8 @@ class SX1262Radio(LoRaRadio):
         return True
 
     def _handle_interrupt(self):
-        """Simple instance method interrupt handler"""
-        logger.debug("Interrupt handler called!")
+        """instance method interrupt handler"""
+
         try:
             if not self._initialized or not self.lora:
                 logger.warning("Interrupt called but radio not initialized")
@@ -214,14 +217,20 @@ class SX1262Radio(LoRaRadio):
 
             # Read IRQ status and handle
             irqStat = self.lora.getIrqStatus()
-            logger.debug(f"Interrupt IRQ status: 0x{irqStat:04X}")
 
-            # Log specific interrupt types for debugging
+            # Clear ALL interrupts immediately to prevent interrupt storms
+            if irqStat != 0:
+                self.lora.clearIrqStatus(irqStat)
+
+            # Store the status for the background task to read
+            self._last_irq_status = irqStat
+
+            # Handle TX_DONE
             if irqStat & self.lora.IRQ_TX_DONE:
                 logger.debug("[TX] TX_DONE interrupt (0x{:04X})".format(self.lora.IRQ_TX_DONE))
                 self._tx_done_event.set()
 
-            # Check for CAD interrupts (needed for LBT)
+            # Handle CAD interrupts
             if irqStat & (self.lora.IRQ_CAD_DETECTED | self.lora.IRQ_CAD_DONE):
                 cad_detected = bool(irqStat & self.lora.IRQ_CAD_DETECTED)
                 cad_done = bool(irqStat & self.lora.IRQ_CAD_DONE)
@@ -231,7 +240,7 @@ class SX1262Radio(LoRaRadio):
                 if hasattr(self, "_cad_event"):
                     self._cad_event.set()
 
-            # Handle RX interrupts normally - no filtering needed since they're disabled during TX
+            # Handle RX interrupts
             rx_interrupts = self._get_rx_irq_mask()
             if irqStat & self.lora.IRQ_RX_DONE:
                 logger.debug("[RX] RX_DONE interrupt (0x{:04X})".format(self.lora.IRQ_RX_DONE))
@@ -308,14 +317,11 @@ class SX1262Radio(LoRaRadio):
                     self._last_packet_activity = time.time()
 
                     try:
-                        # Read and process the received packet
-                        irqStat = self.lora.getIrqStatus()
+                        # Use the IRQ status stored by the interrupt handler
+                        irqStat = self._last_irq_status
                         logger.debug(f"[RX] IRQ Status: 0x{irqStat:04X}")
 
-                        # Clear ALL interrupt flags immediately to prevent duplicate processing
-                        if irqStat != 0:
-                            self.lora.clearIrqStatus(irqStat)
-
+                        # IRQ already cleared by interrupt handler, just process the packet
                         if irqStat & self.lora.IRQ_RX_DONE:
                             (
                                 payloadLengthRx,
@@ -495,8 +501,9 @@ class SX1262Radio(LoRaRadio):
                     False,  # IQ standard
                 )
 
-                self.lora.setPaConfig(0x02, 0x03, 0x00, 0x01)
-                self.lora.setTxParams(self.tx_power, self.lora.PA_RAMP_200U)
+                # Use RadioLib-compatible PA configuration and optimized setTxPower
+                # This automatically configures PA based on requested power level
+                self.lora.setTxPower(self.tx_power, self.lora.TX_POWER_SX1262)
 
                 # Configure RX interrupts (critical for RX functionality!)
                 rx_mask = self._get_rx_irq_mask()
@@ -507,7 +514,7 @@ class SX1262Radio(LoRaRadio):
                 # Reset RF module and set to standby
                 if not self._basic_radio_setup(use_busy_check=True):
                     return False
-
+                self.lora._fixResistanceAntenna()
                 # Configure TCXO, regulator, calibration and RF switch
                 if self.use_dio3_tcxo:
                     # Map voltage to DIO3 constants following Meshtastic pattern
@@ -544,7 +551,7 @@ class SX1262Radio(LoRaRadio):
 
                 self.lora.setRegulatorMode(self.lora.REGULATOR_DC_DC)
                 self.lora.calibrate(0x7F)
-                self.lora.setDio2RfSwitch()
+                self.lora.setDio2RfSwitch(False)
 
                 # Set packet type and frequency
                 rfFreq = int(self.frequency * 33554432 / 32000000)
@@ -552,8 +559,10 @@ class SX1262Radio(LoRaRadio):
 
                 # Set RX gain and TX power
                 self.lora.writeRegister(self.lora.REG_RX_GAIN, [self.lora.RX_GAIN_POWER_SAVING], 1)
-                self.lora.setPaConfig(0x02, 0x03, 0x00, 0x01)
-                self.lora.setTxParams(self.tx_power, self.lora.PA_RAMP_200U)
+                # Use setTxPower for automatic PA configuration based on power level
+                # For E22 modules: 22 dBm from SX1262 → ~30 dBm (1W) via external YP2233W PA
+                logger.info(f"Setting TX power to {self.tx_power} dBm during initialization")
+                self.lora.setTxPower(self.tx_power, self.lora.TX_POWER_SX1262)
 
                 # Configure modulation and packet parameters
                 # Enable LDRO if symbol duration > 16ms (SF11/62.5kHz = 32.768ms)
@@ -578,6 +587,8 @@ class SX1262Radio(LoRaRadio):
                 rx_mask = self._get_rx_irq_mask()
                 self.lora.setDioIrqParams(rx_mask, rx_mask, self.lora.IRQ_NONE, self.lora.IRQ_NONE)
                 self.lora.clearIrqStatus(0xFFFF)
+                # Configure RX gain for maximum sensitivity (boosted mode)
+                self.lora.setRxGain(self.lora.RX_GAIN_BOOSTED)
 
             # Program custom CAD thresholds to chip hardware if available
             if self._custom_cad_peak is not None and self._custom_cad_min is not None:
@@ -741,7 +752,7 @@ class SX1262Radio(LoRaRadio):
                 logger.debug(f"CAD check failed: {e}, proceeding with transmission")
                 break
 
-        # Set TXEN/RXEN pins for TX mode
+        # Set TXEN/RXEN pins for TX mode (matching RadioLib timing)
         self._control_tx_rx_pins(tx_mode=True)
 
         # Check busy status before starting transmission
@@ -858,7 +869,8 @@ class SX1262Radio(LoRaRadio):
         elif irqStat & self.lora.IRQ_TIMEOUT:
             logger.warning("TX_TIMEOUT interrupt received - transmission failed")
         else:
-            logger.warning(f"Unexpected interrupt status: 0x{irqStat:04X}")
+            # No warning for 0x0000 - interrupt already cleared by handler
+            pass
 
         # Get transmission stats if available
         try:
@@ -933,6 +945,12 @@ class SX1262Radio(LoRaRadio):
                 # Setup TX interrupts AFTER CAD checks (CAD changes interrupt config)
                 self._setup_tx_interrupts()
                 await asyncio.sleep(self.RADIO_TIMING_DELAY)
+
+                # Ensure PA configuration is correct before transmission
+                # Re-apply power settings to guarantee proper external
+                # PA operation think cad might be reseting
+                logger.debug(f"Re-applying TX power {self.tx_power} dBm before transmission")
+                self.lora.setTxPower(self.tx_power, self.lora.TX_POWER_SX1262)
 
                 # Execute the transmission
                 if not await self._execute_transmission(driver_timeout):
@@ -1212,9 +1230,6 @@ class SX1262Radio(LoRaRadio):
                 self.lora.clearIrqStatus(irq)
                 detected = bool(irq & self.lora.IRQ_CAD_DETECTED)
                 cad_done = bool(irq & self.lora.IRQ_CAD_DONE)
-
-                if not cad_done:
-                    logger.warning("CAD interrupt received but CAD_DONE flag not set")
 
                 if calibration:
                     return {
