@@ -221,6 +221,7 @@ class SX1262Radio(LoRaRadio):
             # Clear ALL interrupts immediately to prevent interrupt storms
             if irqStat != 0:
                 self.lora.clearIrqStatus(irqStat)
+                time.sleep(0.001)  # 1ms delay
 
             # Store the status for the background task to read
             self._last_irq_status = irqStat
