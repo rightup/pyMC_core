@@ -83,6 +83,9 @@ class Dispatcher:
         self._recent_acks: dict[int, float] = {}  # {crc: timestamp}
         self._waiting_acks = {}
 
+        # Simple TX lock to prevent concurrent transmissions
+        self._tx_lock = asyncio.Lock()
+
         # Use provided packet filter or create default
         if packet_filter is not None:
             self.packet_filter = packet_filter
@@ -388,6 +391,7 @@ class Dispatcher:
     ) -> bool:
         """
         Send a packet and optionally wait for an ACK.
+        Uses a lock to serialize transmissions instead of dropping packets.
 
         Args:
             packet: The packet to send
@@ -395,17 +399,20 @@ class Dispatcher:
             expected_crc: The expected CRC for ACK matching.
                 If None, will be calculated from packet.
         """
+        async with self._tx_lock:  # Wait our turn
+            return await self._send_packet_immediate(packet, wait_for_ack, expected_crc)
+
+    async def _send_packet_immediate(
+        self,
+        packet: Packet,
+        wait_for_ack: bool = True,
+        expected_crc: Optional[int] = None,
+    ) -> bool:
+        """Send a packet immediately (assumes lock is held)."""
         payload_type = packet.header >> PH_TYPE_SHIFT
 
         # ------------------------------------------------------------------ #
-        #  Make sure we're not already busy
-        # ------------------------------------------------------------------ #
-        if self.state != DispatcherState.IDLE:
-            self._log("Busy, skipping TX.")
-            return False
-
-        # ------------------------------------------------------------------ #
-        #  Send the packet
+        #  Send the packet (lock ensures only one transmission at a time)
         # ------------------------------------------------------------------ #
         self.state = DispatcherState.TRANSMIT
         raw = packet.write_to()
@@ -594,7 +601,9 @@ class Dispatcher:
 
     def get_filter_stats(self) -> dict:
         """Get current packet filter statistics."""
-        return self.packet_filter.get_stats()
+        stats = self.packet_filter.get_stats()
+        stats["tx_lock_locked"] = self._tx_lock.locked()
+        return stats
 
     def clear_packet_filter(self) -> None:
         """Clear packet filter data."""
@@ -615,3 +624,7 @@ class Dispatcher:
             except Exception:
                 continue
         return None
+
+    def cleanup(self):
+        """Clean up resources when shutting down."""
+        self._log("Dispatcher cleanup completed")
