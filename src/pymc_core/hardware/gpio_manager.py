@@ -4,15 +4,16 @@ Manages GPIO pins abstraction using python-periphery
 Works on Raspberry Pi, Orange Pi, Luckfox, and other Linux SBCs
 """
 
-import logging
 import glob
-import threading
+import logging
 import sys
-from typing import Callable, Optional, Dict
+import threading
+import time
+from typing import Callable, Dict, Optional
 
 try:
     from periphery import GPIO
-except ImportError as e:
+except ImportError:
     print("\nError: python-periphery library is required for GPIO management.")
     print("━" * 60)
     print("This application requires GPIO hardware access which is only")
@@ -33,7 +34,7 @@ class GPIOPinManager:
     def __init__(self, gpio_chip: str = "/dev/gpiochip0"):
         """
         Initialize GPIO Pin Manager
-        
+
         Args:
             gpio_chip: Path to GPIO chip device (default: /dev/gpiochip0)
                       Set to "auto" to auto-detect first available chip
@@ -45,9 +46,9 @@ class GPIOPinManager:
         self._input_callbacks: Dict[int, Callable] = {}  # Track input pin callbacks
         self._edge_threads: Dict[int, threading.Thread] = {}  # Track edge detection threads
         self._edge_stop_events: Dict[int, threading.Event] = {}  # Stop events for edge threads
-        
+
         logger.debug(f"GPIO Manager initialized with chip: {self._gpio_chip}")
-    
+
     def _resolve_gpio_chip(self, gpio_chip: str) -> str:
         """Resolve GPIO chip path, auto-detecting if needed"""
         if gpio_chip == "auto":
@@ -63,7 +64,7 @@ class GPIOPinManager:
     def setup_output_pin(self, pin_number: int, initial_value: bool = False) -> bool:
         """
         Setup an output pin with initial value
-        
+
         Args:
             pin_number: GPIO line number
             initial_value: Initial state (True=HIGH, False=LOW)
@@ -81,7 +82,7 @@ class GPIOPinManager:
             gpio = GPIO(self._gpio_chip, pin_number, "out")
             gpio.write(initial_value)
             self._pins[pin_number] = gpio
-            
+
             logger.debug(f"Output pin {pin_number} configured (initial={initial_value})")
             return True
         except Exception as e:
@@ -121,7 +122,7 @@ class GPIOPinManager:
     ) -> bool:
         """
         Setup an input pin with optional callback using hardware edge detection
-        
+
         Args:
             pin_number: GPIO line number
             pull_up: Enable pull-up resistor (not all chips support this)
@@ -138,7 +139,7 @@ class GPIOPinManager:
 
             # Determine bias setting
             bias = "pull_up" if pull_up else "default"
-            
+
             # Open GPIO pin as input with edge detection if callback provided
             if callback:
                 gpio = GPIO(self._gpio_chip, pin_number, "in", bias=bias, edge="rising")
@@ -147,10 +148,13 @@ class GPIOPinManager:
             else:
                 # No callback, just simple input
                 gpio = GPIO(self._gpio_chip, pin_number, "in", bias=bias)
-            
+
             self._pins[pin_number] = gpio
-            
-            logger.debug(f"Input pin {pin_number} configured (pull_up={pull_up}, callback={callback is not None})")
+
+            logger.debug(
+                f"Input pin {pin_number} configured "
+                f"(pull_up={pull_up}, callback={callback is not None})"
+            )
             return True
         except Exception as e:
             error_msg = str(e).lower()
@@ -189,12 +193,12 @@ class GPIOPinManager:
     ) -> Optional[GPIO]:
         """
         Setup an interrupt pin with edge detection (alias for setup_input_pin)
-        
+
         Args:
             pin_number: GPIO line number
             pull_up: Enable pull-up resistor
             callback: Function to call on rising edge (hardware interrupt)
-        
+
         Returns:
             GPIO object for direct access, or None on failure
         """
@@ -209,17 +213,20 @@ class GPIOPinManager:
 
             # Determine bias setting
             bias = "pull_up" if pull_up else "default"
-            
+
             # Open GPIO pin as input with edge detection on rising edge
             gpio = GPIO(self._gpio_chip, pin_number, "in", bias=bias, edge="rising")
             self._pins[pin_number] = gpio
-            
+
             # Setup callback with async edge monitoring
             if callback:
                 self._input_callbacks[pin_number] = callback
                 self._start_edge_detection(pin_number)
-            
-            logger.debug(f"Interrupt pin {pin_number} configured (pull_up={pull_up}, callback={callback is not None})")
+
+            logger.debug(
+                f"Interrupt pin {pin_number} configured "
+                f"(pull_up={pull_up}, callback={callback is not None})"
+            )
             return gpio
         except Exception as e:
             error_msg = str(e).lower()
@@ -247,38 +254,38 @@ class GPIOPinManager:
                 print("\nThe system cannot function without GPIO access.")
                 print("━" * 60)
                 sys.exit(1)
-    
+
     def _start_edge_detection(self, pin_number: int) -> None:
         """Start hardware edge detection thread"""
         stop_event = threading.Event()
         self._edge_stop_events[pin_number] = stop_event
-        
+
         thread = threading.Thread(
             target=self._monitor_edge_events,
             args=(pin_number, stop_event),
             daemon=True,
-            name=f"GPIO-Edge-{pin_number}"
+            name=f"GPIO-Edge-{pin_number}",
         )
         thread.start()
         self._edge_threads[pin_number] = thread
         logger.debug(f"Edge detection thread started for pin {pin_number}")
-    
+
     def _monitor_edge_events(self, pin_number: int, stop_event: threading.Event) -> None:
         """Monitor hardware edge events using poll() for interrupts"""
         try:
             gpio = self._pins.get(pin_number)
             if not gpio:
                 return
-            
+
             while not stop_event.is_set() and pin_number in self._pins:
                 try:
                     # Wait for edge event with timeout (longer timeout reduces CPU usage)
                     event = gpio.poll(10.0)
-                    
+
                     if event and not stop_event.is_set():
                         # Read the pin state to consume the edge event
                         pin_state = gpio.read()
-                        
+
                         # Only call callback if pin is actually HIGH
                         # This prevents processing stale edge events when DIO1 is already LOW
                         if pin_state:
@@ -286,13 +293,15 @@ class GPIOPinManager:
                             if callback:
                                 try:
                                     callback()
+                                    # Give CPU breathing space after interrupt callback
+                                    time.sleep(0.001)  # 1ms delay
                                 except Exception as e:
                                     logger.error(f"Edge callback error for pin {pin_number}: {e}")
-                except Exception as poll_error:
+                except Exception:
                     # Timeout or poll error - just continue if not stopping
                     if not stop_event.is_set():
                         pass
-                    
+
         except Exception as e:
             logger.error(f"Edge detection error for pin {pin_number}: {e}")
 
@@ -323,11 +332,11 @@ class GPIOPinManager:
             except Exception as e:
                 logger.warning(f"Failed to set pin {pin_number} LOW: {e}")
         return False
-    
+
     def read_pin(self, pin_number: int) -> Optional[bool]:
         """
         Read current state of a pin
-        
+
         Returns:
             True for HIGH, False for LOW, None if pin not configured or error
         """
@@ -348,7 +357,7 @@ class GPIOPinManager:
             del self._led_threads[pin_number]
         if pin_number in self._led_stop_events:
             del self._led_stop_events[pin_number]
-        
+
         # Stop any edge detection thread for this pin
         if pin_number in self._edge_stop_events:
             self._edge_stop_events[pin_number].set()
@@ -357,11 +366,11 @@ class GPIOPinManager:
             del self._edge_threads[pin_number]
         if pin_number in self._edge_stop_events:
             del self._edge_stop_events[pin_number]
-        
+
         # Remove callback
         if pin_number in self._input_callbacks:
             del self._input_callbacks[pin_number]
-        
+
         # Close GPIO pin
         if pin_number in self._pins:
             try:
@@ -380,7 +389,7 @@ class GPIOPinManager:
             thread.join(timeout=2.0)
         self._led_threads.clear()
         self._led_stop_events.clear()
-        
+
         # Stop all edge detection threads
         for stop_event in self._edge_stop_events.values():
             stop_event.set()
@@ -388,7 +397,7 @@ class GPIOPinManager:
             thread.join(timeout=2.0)
         self._edge_threads.clear()
         self._edge_stop_events.clear()
-        
+
         # Clear callbacks
         self._input_callbacks.clear()
 
@@ -399,10 +408,12 @@ class GPIOPinManager:
                 del self._pins[pin_number]
             except Exception as e:
                 logger.warning(f"Failed to cleanup pin {pin_number}: {e}")
-        
+
         logger.debug("All GPIO pins cleaned up")
 
-    def _led_blink_thread(self, pin_number: int, duration: float, stop_event: threading.Event) -> None:
+    def _led_blink_thread(
+        self, pin_number: int, duration: float, stop_event: threading.Event
+    ) -> None:
         """Internal thread function to blink LED for specified duration"""
         try:
             # Turn LED on
@@ -421,7 +432,7 @@ class GPIOPinManager:
             # Ensure LED is off on error
             try:
                 self.set_pin_low(pin_number)
-            except:
+            except Exception:
                 pass
         finally:
             # Remove from active threads
@@ -455,12 +466,12 @@ class GPIOPinManager:
             # Start new LED thread
             stop_event = threading.Event()
             self._led_stop_events[pin_number] = stop_event
-            
+
             thread = threading.Thread(
                 target=self._led_blink_thread,
                 args=(pin_number, duration, stop_event),
                 daemon=True,
-                name=f"GPIO-LED-{pin_number}"
+                name=f"GPIO-LED-{pin_number}",
             )
             thread.start()
             self._led_threads[pin_number] = thread
