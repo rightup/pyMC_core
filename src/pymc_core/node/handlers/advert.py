@@ -51,9 +51,21 @@ class AdvertHandler(BaseHandler):
     ) -> bool:
         """Verify the cryptographic signature of the advert packet."""
         try:
+
+            if len(pubkey) != PUB_KEY_SIZE:
+                self.log(f"Invalid public key length: {len(pubkey)} bytes (expected {PUB_KEY_SIZE})")
+                return False
+            
+            if len(signature) != SIGNATURE_SIZE:
+                self.log(f"Invalid signature length: {len(signature)} bytes (expected {SIGNATURE_SIZE})")
+                return False
+            
             peer_identity = Identity(pubkey)
+        except ValueError as exc:
+            self.log(f"Unable to construct peer identity - invalid key format: {exc}")
+            return False
         except Exception as exc:
-            self.log(f"Unable to construct peer identity: {exc}")
+            self.log(f"Unable to construct peer identity: {type(exc).__name__}: {exc}")
             return False
 
         signed_region = pubkey + timestamp + appdata
