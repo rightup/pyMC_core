@@ -526,6 +526,7 @@ class Dispatcher:
 
     async def run_forever(self) -> None:
         """Run the dispatcher maintenance loop indefinitely (call this in an asyncio task)."""
+        health_check_counter = 0
         while True:
             # Clean out old ACK CRCs (older than 5 seconds)
             now = asyncio.get_event_loop().time()
@@ -533,6 +534,13 @@ class Dispatcher:
 
             # Clean old packet hashes for deduplication
             self.packet_filter.cleanup_old_hashes()
+
+            # Simple health check every 60 seconds
+            health_check_counter += 1
+            if health_check_counter >= 60:
+                health_check_counter = 0
+                if hasattr(self.radio, "check_radio_health"):
+                    self.radio.check_radio_health()
 
             # With callback-based RX, just do maintenance tasks
             await asyncio.sleep(1.0)  # Check every second for cleanup
