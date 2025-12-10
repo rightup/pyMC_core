@@ -279,28 +279,19 @@ class GPIOPinManager:
 
             while not stop_event.is_set() and pin_number in self._pins:
                 try:
-                    # Wait for edge event with timeout (longer timeout reduces CPU usage)
-                    event = gpio.poll(10.0)
+                    # Wait for edge event - hardware will wake us up
+                    event = gpio.poll(30.0)
 
                     if event and not stop_event.is_set():
-                        # Read the pin state to consume the edge event
-                        pin_state = gpio.read()
-
-                        # Only call callback if pin is actually HIGH
-                        # This prevents processing stale edge events when DIO1 is already LOW
-                        if pin_state:
+                        # Only call callback if pin is HIGH
+                        if gpio.read():
                             callback = self._input_callbacks.get(pin_number)
                             if callback:
-                                try:
-                                    callback()
-                                    # Give CPU breathing space after interrupt callback
-                                    time.sleep(0.001)  # 1ms delay
-                                except Exception as e:
-                                    logger.error(f"Edge callback error for pin {pin_number}: {e}")
+                                callback()
+
                 except Exception:
-                    # Timeout or poll error - just continue if not stopping
                     if not stop_event.is_set():
-                        pass
+                        time.sleep(0.1)  # Brief pause on errors
 
         except Exception as e:
             logger.error(f"Edge detection error for pin {pin_number}: {e}")
