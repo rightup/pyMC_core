@@ -279,14 +279,12 @@ class GPIOPinManager:
 
             while not stop_event.is_set() and pin_number in self._pins:
                 try:
-                    event: Any = gpio.poll(30.0)
-
-                    if event and not stop_event.is_set():
-
-                        if event.edge == "rising":
-                            callback = self._input_callbacks.get(pin_number)
-                            if callback:
-                                callback()
+                    # Wait for edge event - returns True on rising edge (we configured edge="rising")
+                    # No need to call read_event() since we only listen for rising edges
+                    if gpio.poll(30.0) and not stop_event.is_set():
+                        callback = self._input_callbacks.get(pin_number)
+                        if callback:
+                            callback()
 
                 except Exception:
                     if not stop_event.is_set():
