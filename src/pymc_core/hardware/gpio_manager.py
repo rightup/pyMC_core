@@ -9,7 +9,7 @@ import logging
 import sys
 import threading
 import time
-from typing import Callable, Dict, Optional
+from typing import Any, Callable, Dict, Optional
 
 try:
     from periphery import GPIO
@@ -279,12 +279,11 @@ class GPIOPinManager:
 
             while not stop_event.is_set() and pin_number in self._pins:
                 try:
-                    # Wait for edge event - hardware will wake us up
-                    event = gpio.poll(30.0)
+                    event: Any = gpio.poll(30.0)
 
                     if event and not stop_event.is_set():
-                        # Only call callback if pin is HIGH
-                        if gpio.read():
+
+                        if event.edge == "rising":
                             callback = self._input_callbacks.get(pin_number)
                             if callback:
                                 callback()
