@@ -17,7 +17,7 @@ from typing import Optional
 
 from .base import LoRaRadio
 from .gpio_manager import GPIOPinManager
-from .lora.LoRaRF.SX126x import SX126x
+from .lora.LoRaRF.SX126x import SX126x, set_gpio_manager
 
 logger = logging.getLogger("SX1262_wrapper")
 
@@ -125,6 +125,10 @@ class SX1262Radio(LoRaRadio):
         self._txen_pin_setup = False
         self._txled_pin_setup = False
         self._rxled_pin_setup = False
+
+        # Share GPIO manager instance with SX126x low-level driver
+        # This ensures singleton behavior - all GPIO access goes through one manager
+        set_gpio_manager(self._gpio_manager)
 
         self._tx_done_event = asyncio.Event()
         self._rx_done_event = asyncio.Event()
