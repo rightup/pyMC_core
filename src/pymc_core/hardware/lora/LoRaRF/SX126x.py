@@ -11,18 +11,22 @@ def set_gpio_manager(gpio_manager):
 
 
 def _get_output(pin):
-    """Get output pin via centralized GPIO manager"""
+    """Get output pin via centralized GPIO manager (setup only if needed)"""
     if _gpio_manager is None:
         raise RuntimeError("GPIO manager not initialized. Call set_gpio_manager() first.")
-    _gpio_manager.setup_output_pin(pin, initial_value=True)
+    # Only setup if pin doesn't exist yet
+    if pin not in _gpio_manager._pins:
+        _gpio_manager.setup_output_pin(pin, initial_value=True)
     return _gpio_manager._pins[pin]
 
 
 def _get_input(pin):
-    """Get input pin via centralized GPIO manager"""
+    """Get input pin via centralized GPIO manager (setup only if needed)"""
     if _gpio_manager is None:
         raise RuntimeError("GPIO manager not initialized. Call set_gpio_manager() first.")
-    _gpio_manager.setup_input_pin(pin)
+    # Only setup if pin doesn't exist yet
+    if pin not in _gpio_manager._pins:
+        _gpio_manager.setup_input_pin(pin)
     return _gpio_manager._pins[pin]
 
 
@@ -30,18 +34,22 @@ def _get_output_safe(pin):
     """Get output pin safely - return None if GPIO busy"""
     if _gpio_manager is None:
         return None
-    if _gpio_manager.setup_output_pin(pin, initial_value=True):
-        return _gpio_manager._pins.get(pin)
-    return None
+    # Only setup if pin doesn't exist yet
+    if pin not in _gpio_manager._pins:
+        if not _gpio_manager.setup_output_pin(pin, initial_value=True):
+            return None
+    return _gpio_manager._pins.get(pin)
 
 
 def _get_input_safe(pin):
     """Get input pin safely - return None if GPIO busy"""
     if _gpio_manager is None:
         return None
-    if _gpio_manager.setup_input_pin(pin):
-        return _gpio_manager._pins.get(pin)
-    return None
+    # Only setup if pin doesn't exist yet
+    if pin not in _gpio_manager._pins:
+        if not _gpio_manager.setup_input_pin(pin):
+            return None
+    return _gpio_manager._pins.get(pin)
 
 
 class SX126x(BaseLoRa):
