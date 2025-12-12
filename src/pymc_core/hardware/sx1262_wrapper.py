@@ -181,18 +181,14 @@ class SX1262Radio(LoRaRadio):
     
     def _irq_trampoline(self):
         """Lightweight trampoline called by GPIO thread - schedules real handler on event loop."""
-        if self._event_loop is not None:
-            try:
+        try:
+            if self._event_loop is not None:
                 self._event_loop.call_soon_threadsafe(self._handle_interrupt)
-            except Exception as e:
-                # Minimal logging - avoid blocking GPIO thread
-                logger.error(f"IRQ trampoline error: {e}")
-        else:
-            # No event loop yet - try to handle directly (fallback for early interrupts)
-            try:
-                self._handle_interrupt()
-            except Exception as e:
-                logger.error(f"IRQ fallback error: {e}")
+            else:
+                logger.warning("IRQ received before event loop initialized; ignoring early interrupt")
+        except Exception as e:
+            logger.error(f"IRQ trampoline error: {e}", exc_info=True)
+
 
     def _safe_radio_operation(
         self, operation_name: str, operation_func, success_msg: str = None
