@@ -137,6 +137,10 @@ class SX1262Radio(LoRaRadio):
         # Store last IRQ status for background task
         self._last_irq_status = 0
 
+        # Store CAD results from interrupt handler
+        self._last_cad_detected = False
+        self._last_cad_irq_status = 0
+
         # Custom CAD thresholds (None means use defaults)
         self._custom_cad_peak = None
         self._custom_cad_min = None
@@ -237,10 +241,13 @@ class SX1262Radio(LoRaRadio):
             # Handle CAD interrupts
             if irqStat & (self.lora.IRQ_CAD_DETECTED | self.lora.IRQ_CAD_DONE):
                 cad_detected = bool(irqStat & self.lora.IRQ_CAD_DETECTED)
-                cad_done = bool(irqStat & self.lora.IRQ_CAD_DONE)
-                logger.debug(
-                    f"[CAD] interrupt detected: {cad_detected}, done: {cad_done} (0x{irqStat:04X})"
-                )
+                if cad_detected:
+                    logger.debug(f"[CAD] Channel activity detected (0x{irqStat:04X})")
+                else:
+                    logger.debug(f"[CAD] Channel clear detected (0x{irqStat:04X})")
+                # Store CAD result for perform_cad() to read
+                self._last_cad_detected = cad_detected
+                self._last_cad_irq_status = irqStat
                 if hasattr(self, "_cad_event"):
                     self._cad_event.set()
 
@@ -791,9 +798,12 @@ class SX1262Radio(LoRaRadio):
                 # Perform CAD with your custom thresholds
                 channel_busy = await self.perform_cad(timeout=0.5)
                 if not channel_busy:
-                    logger.debug(f"Channel clear after {lbt_attempts + 1} CAD checks")
+                    logger.debug(
+                        f"CAD check clear - channel available after {lbt_attempts + 1} attempts"
+                    )
                     break
                 else:
+                    logger.debug("CAD check still busy - channel activity detected")
                     lbt_attempts += 1
                     if lbt_attempts < max_lbt_attempts:
                         # Jitter (50-200ms)
@@ -804,13 +814,14 @@ class SX1262Radio(LoRaRadio):
                         backoff_ms = min(backoff_ms, 5000)
 
                         logger.debug(
-                            f"Channel busy (CAD detected activity), backing off {backoff_ms}ms "
-                            f"- attempt {lbt_attempts}/{max_lbt_attempts} (exponential backoff)"
+                            f"CAD backoff - waiting {backoff_ms}ms before retry "
+                            f"(attempt {lbt_attempts}/{max_lbt_attempts})"
                         )
                         await asyncio.sleep(backoff_ms / 1000.0)
                     else:
                         logger.warning(
-                            f"Channel still busy after {max_lbt_attempts} CAD attempts - tx anyway"
+                            f"CAD max attempts reached - channel still busy after "
+                            f"{max_lbt_attempts} attempts, transmitting anyway"
                         )
             except Exception as e:
                 logger.warning(f"CAD check failed: {e}, proceeding with transmission")
@@ -1278,19 +1289,31 @@ class SX1262Radio(LoRaRadio):
             # Start CAD operation
             self.lora.setCad()
 
-            logger.debug(f"CAD started with peak={det_peak}, min={det_min}")
+            logger.debug(
+                f"CAD operation started - checking channel with peak={det_peak}, min={det_min}"
+            )
 
             # Wait for CAD completion
             try:
                 await asyncio.wait_for(self._cad_event.wait(), timeout=timeout)
                 self._cad_event.clear()
 
-                irq = self.lora.getIrqStatus()
-                logger.debug(f"CAD completed with IRQ status: 0x{irq:04X}")
-                # Read detection status BEFORE clearing IRQ flags
-                detected = bool(irq & self.lora.IRQ_CAD_DETECTED)
+                # Use CAD results stored by interrupt handler (avoids race condition)
+                irq = self._last_cad_irq_status
+                detected = self._last_cad_detected
                 cad_done = bool(irq & self.lora.IRQ_CAD_DONE)
-                self.lora.clearIrqStatus(irq)
+
+                logger.debug(f"CAD operation completed - IRQ status: 0x{irq:04X}")
+
+                if detected:
+                    logger.debug("CAD result: BUSY - channel activity detected")
+                else:
+                    logger.debug("CAD result: CLEAR - no channel activity detected")
+
+                # Clear hardware IRQ status
+                current_irq = self.lora.getIrqStatus()
+                if current_irq != 0:
+                    self.lora.clearIrqStatus(current_irq)
 
                 if calibration:
                     return {
@@ -1307,7 +1330,7 @@ class SX1262Radio(LoRaRadio):
                     return detected
 
             except asyncio.TimeoutError:
-                logger.debug("CAD operation timed out")
+                logger.debug("CAD operation timed out - assuming channel clear")
                 # Check if there were any interrupt flags set anyway
                 irq = self.lora.getIrqStatus()
                 if irq != 0:
