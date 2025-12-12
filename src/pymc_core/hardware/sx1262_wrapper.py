@@ -131,6 +131,9 @@ class SX1262Radio(LoRaRadio):
 
         # Store last IRQ status for background task
         self._last_irq_status = 0
+        
+        # Track event loop for thread-safe interrupt handling
+        self._event_loop = None
 
         # Store CAD results from interrupt handler
         self._last_cad_detected = False
@@ -175,6 +178,21 @@ class SX1262Radio(LoRaRadio):
     def _get_tx_irq_mask(self) -> int:
         """Get the standard TX interrupt mask"""
         return self.lora.IRQ_TX_DONE | self.lora.IRQ_TIMEOUT
+    
+    def _irq_trampoline(self):
+        """Lightweight trampoline called by GPIO thread - schedules real handler on event loop."""
+        if self._event_loop is not None:
+            try:
+                self._event_loop.call_soon_threadsafe(self._handle_interrupt)
+            except Exception as e:
+                # Minimal logging - avoid blocking GPIO thread
+                logger.error(f"IRQ trampoline error: {e}")
+        else:
+            # No event loop yet - try to handle directly (fallback for early interrupts)
+            try:
+                self._handle_interrupt()
+            except Exception as e:
+                logger.error(f"IRQ fallback error: {e}")
 
     def _safe_radio_operation(
         self, operation_name: str, operation_func, success_msg: str = None
@@ -316,6 +334,8 @@ class SX1262Radio(LoRaRadio):
         ):
             try:
                 loop = asyncio.get_running_loop()
+                # Capture event loop for thread-safe interrupt handling
+                self._event_loop = loop
                 self._rx_irq_task = loop.create_task(self._rx_irq_background_task())
             except RuntimeError:
                 logger.debug("No event loop available for RX task startup")
@@ -472,8 +492,10 @@ class SX1262Radio(LoRaRadio):
         try:
             logger.debug("Initializing SX1262 radio...")
             self.lora = SX126x()
+            
+            # Register GPIO interrupt using lightweight trampoline
             self.irq_pin = self._gpio_manager.setup_interrupt_pin(
-                self.irq_pin_number, pull_up=False, callback=self._handle_interrupt
+                self.irq_pin_number, pull_up=False, callback=self._irq_trampoline
             )
 
             if self.irq_pin is not None:
@@ -680,6 +702,8 @@ class SX1262Radio(LoRaRadio):
                     ):
                         try:
                             loop = asyncio.get_running_loop()
+                            # Capture event loop for thread-safe interrupt handling
+                            self._event_loop = loop
                         except RuntimeError:
                             # No event loop running, we'll start the task later
                             # when one is available
