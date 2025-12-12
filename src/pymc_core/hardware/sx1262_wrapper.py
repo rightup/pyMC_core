@@ -1287,9 +1287,10 @@ class SX1262Radio(LoRaRadio):
 
                 irq = self.lora.getIrqStatus()
                 logger.debug(f"CAD completed with IRQ status: 0x{irq:04X}")
-                self.lora.clearIrqStatus(irq)
+                # Read detection status BEFORE clearing IRQ flags
                 detected = bool(irq & self.lora.IRQ_CAD_DETECTED)
                 cad_done = bool(irq & self.lora.IRQ_CAD_DONE)
+                self.lora.clearIrqStatus(irq)
 
                 if calibration:
                     return {
