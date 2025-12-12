@@ -699,20 +699,34 @@ class SX1262Radio(LoRaRadio):
             raise RuntimeError(f"Failed to initialize SX1262 radio: {e}") from e
 
     def _calculate_tx_timeout(self, packet_length: int) -> tuple[int, int]:
-        """Calculate transmission timeout using C++ MeshCore formula"""
+        """Accurate LoRa airtime + TX timeout calculation (fixed)."""
 
-        symbol_time = float(1 << self.spreading_factor) / float(self.bandwidth)
-        preamble_time = (self.preamble_length + 4.25) * symbol_time
-        tmp = (8 * packet_length) - (4 * self.spreading_factor) + 28 + 16
-        # CRC is enabled
-        tmp -= 16
+        sf = self.spreading_factor
+        bw_hz = int(self.bandwidth)  # your class already stores Hz
+        cr = self.coding_rate        # 1→4/5, 2→4/6, 3→4/7, 4→4/8
+        preamble = self.preamble_length
+        crc_on = True                # you always enable CRC
+        explicit_header = True       # you always use explicit header
+        low_dr_opt = 1 if (sf >= 11 and bw_hz <= 125000) else 0
+        symbol_time = (1 << sf) / float(bw_hz)
+        preamble_time = (preamble + 4.25) * symbol_time
+        ih = 0 if explicit_header else 1
+        crc = 1 if crc_on else 0
+
+        tmp = (
+            8 * packet_length
+            - 4 * sf
+            + 28
+            + 16 * crc
+            - 20 * ih
+        )
+
+        denom = 4 * (sf - 2 * low_dr_opt)
 
         if tmp > 0:
-            payload_symbols = 8.0 + math.ceil(float(tmp) / float(4 * self.spreading_factor)) * (
-                self.coding_rate + 4
-            )
+            payload_symbols = 8 + max(math.ceil(tmp / denom) * (cr + 4), 0)
         else:
-            payload_symbols = 8.0
+            payload_symbols = 8
 
         payload_time = payload_symbols * symbol_time
         air_time_ms = (preamble_time + payload_time) * 1000.0
@@ -720,19 +734,20 @@ class SX1262Radio(LoRaRadio):
         driver_timeout = timeout_ms * 64
 
         logger.debug(
-            f"TX timing SF{self.spreading_factor}/{self.bandwidth/1000:.1f}kHz "
-            f"CR4/{self.coding_rate} {packet_length}B: "
-            f"symbol={symbol_time*1000:.1f}ms, "
-            f"preamble={preamble_time*1000:.0f}ms, "
+            f"TX timing SF{sf}/{bw_hz/1000:.1f}kHz "
+            f"CR4/{cr} {packet_length}B: "
+            f"symbol={symbol_time*1000:.3f}ms, "
+            f"preamble={preamble_time*1000:.1f}ms, "
             f"tmp={tmp}, "
             f"payload_syms={payload_symbols:.1f}, "
-            f"payload={payload_time*1000:.0f}ms, "
-            f"air_time={air_time_ms:.0f}ms, "
+            f"payload={payload_time*1000:.1f}ms, "
+            f"air_time={air_time_ms:.1f}ms, "
             f"timeout={timeout_ms}ms, "
             f"driver_timeout={driver_timeout}"
         )
 
         return timeout_ms, driver_timeout
+
 
     def _prepare_packet_transmission(self, data_list: list, length: int) -> None:
         """Prepare radio for packet transmission"""
@@ -966,7 +981,7 @@ class SX1262Radio(LoRaRadio):
 
                 # Calculate transmission timeout
                 final_timeout_ms, driver_timeout = self._calculate_tx_timeout(length)
-                timeout_seconds = (final_timeout_ms / 1000.0) + 3.0  # Add 3 seconds buffer
+                timeout_seconds = (final_timeout_ms / 1000.0) + 0.5  # Add margin
 
                 self._prepare_packet_transmission(data_list, length)
 
