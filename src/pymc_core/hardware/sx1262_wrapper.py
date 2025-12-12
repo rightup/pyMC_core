@@ -323,7 +323,8 @@ class SX1262Radio(LoRaRadio):
                 loop = asyncio.get_running_loop()
                 self._rx_irq_task = loop.create_task(self._rx_irq_background_task())
             except RuntimeError:
-                pass
+                # No event loop running, we'll start the task later
+                logger.debug("No event loop available for RX task startup")
             except Exception as e:
                 logger.warning(f"Failed to start delayed RX IRQ background handler: {e}")
 
@@ -812,7 +813,7 @@ class SX1262Radio(LoRaRadio):
                             f"Channel still busy after {max_lbt_attempts} CAD attempts - tx anyway"
                         )
             except Exception as e:
-                logger.debug(f"CAD check failed: {e}, proceeding with transmission")
+                logger.warning(f"CAD check failed: {e}, proceeding with transmission")
                 break
 
         # Set TXEN/RXEN pins for TX mode (matching RadioLib timing)
@@ -1340,9 +1341,16 @@ class SX1262Radio(LoRaRadio):
             else:
                 return False
         finally:
-            # Restore RX mode after CAD using LoRaRF's high-level method
             try:
+                # Full sequence required to prevent SX1262 lockups after CAD
+                self.lora.clearIrqStatus(0xFFFF)
+                self.lora.setStandby(self.lora.STANDBY_RC)
+                await asyncio.sleep(0.001)
+
+                # Use standardized RX restoration method like everywhere else
                 self.lora.request(self.lora.RX_CONTINUOUS)
+                await asyncio.sleep(0.001)
+                self.lora.clearIrqStatus(0xFFFF)
             except Exception as e:
                 logger.warning(f"Failed to restore RX mode after CAD: {e}")
 
