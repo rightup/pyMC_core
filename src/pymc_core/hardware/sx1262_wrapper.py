@@ -131,7 +131,7 @@ class SX1262Radio(LoRaRadio):
 
         # Store last IRQ status for background task
         self._last_irq_status = 0
-        
+
         # Track event loop for thread-safe interrupt handling
         self._event_loop = None
 
@@ -178,17 +178,18 @@ class SX1262Radio(LoRaRadio):
     def _get_tx_irq_mask(self) -> int:
         """Get the standard TX interrupt mask"""
         return self.lora.IRQ_TX_DONE | self.lora.IRQ_TIMEOUT
-    
+
     def _irq_trampoline(self):
         """Lightweight trampoline called by GPIO thread - schedules real handler on event loop."""
         try:
             if self._event_loop is not None:
                 self._event_loop.call_soon_threadsafe(self._handle_interrupt)
             else:
-                logger.warning("IRQ received before event loop initialized; ignoring early interrupt")
+                logger.warning(
+                    "IRQ received before event loop initialized; ignoring early interrupt"
+                )
         except Exception as e:
             logger.error(f"IRQ trampoline error: {e}", exc_info=True)
-
 
     def _safe_radio_operation(
         self, operation_name: str, operation_func, success_msg: str = None
@@ -488,7 +489,7 @@ class SX1262Radio(LoRaRadio):
         try:
             logger.debug("Initializing SX1262 radio...")
             self.lora = SX126x()
-            
+
             # Register GPIO interrupt using lightweight trampoline
             self.irq_pin = self._gpio_manager.setup_interrupt_pin(
                 self.irq_pin_number, pull_up=False, callback=self._irq_trampoline
@@ -720,10 +721,12 @@ class SX1262Radio(LoRaRadio):
 
     def _calculate_tx_timeout(self, packet_length: int) -> tuple[int, int]:
         """
-        Calculate the LoRa packet airtime and transmission timeout using the standard Semtech formula.
+        Calculate the LoRa packet airtime and transmission timeout using the standard
+        Semtech formula.
 
-        This method implements the LoRa airtime calculation as described in the Semtech LoRa Modem Designer's Guide
-        (AN1200.13, section 4.1), taking into account the following parameters:
+        This method implements the LoRa airtime calculation as described in the Semtech
+        LoRa Modem Designer's Guide (AN1200.13, section 4.1), taking into account the
+        following parameters:
             - Spreading Factor (SF)
             - Bandwidth (BW)
             - Coding Rate (CR)
@@ -734,27 +737,24 @@ class SX1262Radio(LoRaRadio):
             - Payload length (packet_length)
 
         Returns:
-            timeout_ms (int): Calculated packet transmission timeout in milliseconds (airtime + margin).
-            driver_timeout (int): Timeout value in units required by the radio driver (typically ms * 64).
+            timeout_ms (int): Calculated packet transmission timeout in milliseconds
+                (airtime + margin).
+            driver_timeout (int): Timeout value in units required by the radio driver
+                (typically ms * 64).
         """
+        sf = self.spreading_factor
         bw_hz = int(self.bandwidth)  # your class already stores Hz
-        cr = self.coding_rate        # 1→4/5, 2→4/6, 3→4/7, 4→4/8
+        cr = self.coding_rate  # 1→4/5, 2→4/6, 3→4/7, 4→4/8
         preamble = self.preamble_length
-        crc_on = True                # you always enable CRC
-        explicit_header = True       # you always use explicit header
+        crc_on = True  # you always enable CRC
+        explicit_header = True  # you always use explicit header
         low_dr_opt = 1 if (sf >= 11 and bw_hz <= 125000) else 0
         symbol_time = (1 << sf) / float(bw_hz)
         preamble_time = (preamble + 4.25) * symbol_time
         ih = 0 if explicit_header else 1
         crc = 1 if crc_on else 0
 
-        tmp = (
-            8 * packet_length
-            - 4 * sf
-            + 28
-            + 16 * crc
-            - 20 * ih
-        )
+        tmp = 8 * packet_length - 4 * sf + 28 + 16 * crc - 20 * ih
 
         denom = 4 * (sf - 2 * low_dr_opt)
 
@@ -782,7 +782,6 @@ class SX1262Radio(LoRaRadio):
         )
 
         return timeout_ms, driver_timeout
-
 
     def _prepare_packet_transmission(self, data_list: list, length: int) -> None:
         """Prepare radio for packet transmission"""
