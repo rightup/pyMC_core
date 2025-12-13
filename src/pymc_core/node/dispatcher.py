@@ -297,8 +297,6 @@ class Dispatcher:
 
     def _on_packet_received(self, data: bytes) -> None:
         """Called by the radio when a packet comes in."""
-        self._log(f"[RX DEBUG] Packet received: {len(data)} bytes")
-
         # Schedule the packet processing in the event loop
         try:
             loop = asyncio.get_running_loop()
