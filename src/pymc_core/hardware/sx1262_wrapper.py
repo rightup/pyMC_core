@@ -719,9 +719,24 @@ class SX1262Radio(LoRaRadio):
             raise RuntimeError(f"Failed to initialize SX1262 radio: {e}") from e
 
     def _calculate_tx_timeout(self, packet_length: int) -> tuple[int, int]:
-        """Accurate LoRa airtime + TX timeout calculation (fixed)."""
+        """
+        Calculate the LoRa packet airtime and transmission timeout using the standard Semtech formula.
 
-        sf = self.spreading_factor
+        This method implements the LoRa airtime calculation as described in the Semtech LoRa Modem Designer's Guide
+        (AN1200.13, section 4.1), taking into account the following parameters:
+            - Spreading Factor (SF)
+            - Bandwidth (BW)
+            - Coding Rate (CR)
+            - Preamble length
+            - Explicit/implicit header mode (always explicit here)
+            - CRC enabled (always enabled here)
+            - Low Data Rate Optimization (enabled if SF >= 11 and BW <= 125 kHz)
+            - Payload length (packet_length)
+
+        Returns:
+            timeout_ms (int): Calculated packet transmission timeout in milliseconds (airtime + margin).
+            driver_timeout (int): Timeout value in units required by the radio driver (typically ms * 64).
+        """
         bw_hz = int(self.bandwidth)  # your class already stores Hz
         cr = self.coding_rate        # 1→4/5, 2→4/6, 3→4/7, 4→4/8
         preamble = self.preamble_length
