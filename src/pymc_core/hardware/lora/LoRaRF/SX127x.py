@@ -2,6 +2,7 @@ import time
 
 import spidev
 
+from ...signal_utils import snr_register_to_db
 from .base import BaseLoRa
 
 spi = spidev.SpiDev()
@@ -29,6 +30,13 @@ def _get_input(pin):
     if pin not in _gpio_pins:
         _gpio_pins[pin] = DigitalInputDevice(pin)
     return _gpio_pins[pin]
+
+
+def _rssi_register_to_dbm(raw_value):
+    """Convert RSSI register units (-0.5 dBm per LSB) into dBm."""
+    if raw_value is None:
+        return 0.0
+    return raw_value / -2.0
 
 
 class SX126x(BaseLoRa):
@@ -989,19 +997,26 @@ class SX126x(BaseLoRa):
 
     def packetRssi(self) -> float:
         # get relative signal strength index (RSSI) of last incoming package
-        (rssiPkt, snrPkt, signalRssiPkt) = self.getPacketStatus()
-        return rssiPkt / -2.0
+        rssi_dbm, _, _ = self.getSignalMetrics()
+        return rssi_dbm
 
     def snr(self) -> float:
         # get signal to noise ratio (SNR) of last incoming package
-        (rssiPkt, snrPkt, signalRssiPkt) = self.getPacketStatus()
-        if snrPkt > 127:
-            snrPkt = snrPkt - 256
-        return snrPkt / 4.0
+        _, snr_db, _ = self.getSignalMetrics()
+        return snr_db
 
     def signalRssi(self) -> float:
-        (rssiPkt, snrPkt, signalRssiPkt) = self.getPacketStatus()
-        return signalRssiPkt / -2.0
+        _, _, signal_rssi_dbm = self.getSignalMetrics()
+        return signal_rssi_dbm
+
+    def getSignalMetrics(self) -> tuple:
+        """Return RSSI, SNR, and signal RSSI (all in dB) for the last packet."""
+        rssiPkt, snrPkt, signalRssiPkt = self.getPacketStatus()
+        return (
+            _rssi_register_to_dbm(rssiPkt),
+            snr_register_to_db(snrPkt),
+            _rssi_register_to_dbm(signalRssiPkt),
+        )
 
     def rssiInst(self) -> float:
         return self.getRssiInst() / -2.0

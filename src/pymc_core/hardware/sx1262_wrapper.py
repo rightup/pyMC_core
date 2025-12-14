@@ -110,6 +110,7 @@ class SX1262Radio(LoRaRadio):
         self.lora: Optional[SX126x] = None
         self.last_rssi: int = -99
         self.last_snr: float = 0.0
+        self.last_signal_rssi: int = -99
         self._initialized = False
         self._rx_lock = asyncio.Lock()
         self._tx_lock = asyncio.Lock()
@@ -367,9 +368,12 @@ class SX1262Radio(LoRaRadio):
                                     payloadLengthRx,
                                     rxStartBufferPointer,
                                 ) = self.lora.getRxBufferStatus()
-                                rssiPkt, snrPkt, signalRssiPkt = self.lora.getPacketStatus()
-                                self.last_rssi = int(rssiPkt / -2)
-                                self.last_snr = snrPkt / 4
+                                packet_rssi_dbm, snr_db, signal_rssi_dbm = (
+                                    self.lora.getSignalMetrics()
+                                )
+                                self.last_rssi = int(packet_rssi_dbm)
+                                self.last_snr = snr_db
+                                self.last_signal_rssi = int(signal_rssi_dbm)
 
                                 logger.debug(
                                     f"[RX] Packet received: length={payloadLengthRx}, "
@@ -1073,6 +1077,10 @@ class SX1262Radio(LoRaRadio):
         """Return last received SNR in dB"""
         return self.last_snr
 
+    def get_last_signal_rssi(self) -> int:
+        """Return last received signal RSSI in dBm"""
+        return self.last_signal_rssi
+
     def _sample_noise_floor(self) -> None:
         """Sample noise floor"""
         if not self._initialized or self.lora is None:
@@ -1189,6 +1197,7 @@ class SX1262Radio(LoRaRadio):
             "coding_rate": self.coding_rate,
             "last_rssi": self.last_rssi,
             "last_snr": self.last_snr,
+            "last_signal_rssi": self.last_signal_rssi,
         }
 
         if self._initialized and self.lora:

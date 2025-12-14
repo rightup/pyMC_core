@@ -7,6 +7,7 @@ back as PATH packets with encrypted payloads.
 import struct
 from typing import Any, Callable, Dict, Optional
 
+from ...hardware.signal_utils import snr_register_to_db
 from ...protocol import CryptoUtils, Identity, Packet
 from ...protocol.constants import PAYLOAD_TYPE_PATH
 
@@ -168,7 +169,7 @@ class ProtocolResponseHandler:
                 "total_up_time_secs": parsed[11],  # Uptime in seconds
                 "total_air_time_secs": parsed[13],  # Air time in seconds
                 "err_events": parsed[17],  # Error events count
-                "last_snr": self._convert_signed_16bit(parsed[19]) / 4.0,  # SNR in dB (scaled by 4)
+                "last_snr": snr_register_to_db(parsed[19], bits=16),
                 "n_flood_dups": parsed[22],  # Flood duplicate packets
                 "n_direct_dups": parsed[23],  # Direct duplicate packets
             }
