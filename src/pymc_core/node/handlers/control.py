@@ -8,6 +8,7 @@ import struct
 import time
 from typing import Any, Callable, Dict, Optional
 
+from ...hardware.signal_utils import snr_register_to_db
 from ...protocol import Packet
 from ...protocol.constants import PAYLOAD_TYPE_CONTROL
 
@@ -162,8 +163,7 @@ class ControlHandler:
             type_byte = pkt.payload[0]
             node_type = type_byte & 0x0F
             snr_byte = pkt.payload[1]
-            # Convert signed byte to float SNR (C++ stores as int8_t multiplied by 4)
-            inbound_snr = (snr_byte if snr_byte < 128 else snr_byte - 256) / 4.0
+            inbound_snr = snr_register_to_db(snr_byte)
             tag = struct.unpack("<I", pkt.payload[2:6])[0]
             pub_key = pkt.payload[6:]
 
