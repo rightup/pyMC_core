@@ -24,8 +24,81 @@ from typing import Dict, Optional
 from common import create_mesh_node
 
 from pymc_core.node.handlers.login_server import LoginServerHandler
-from pymc_core.protocol import Identity
+from pymc_core.protocol import Identity, LocalIdentity
 from pymc_core.protocol.constants import PUB_KEY_SIZE
+
+
+def create_mesh_node_with_identity(
+    node_name: str, radio_type: str, serial_port: str, identity: LocalIdentity
+) -> tuple[any, LocalIdentity]:
+    """Create a mesh node with a specific identity (modified from common.py)"""
+    import logging
+    import os
+    import sys
+
+    # Set up logging (copied from common.py)
+    logger = logging.getLogger(__name__)
+
+    # Add the src directory to the path so we can import pymc_core
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
+
+    from common import create_radio
+
+    from pymc_core.node.node import MeshNode
+
+    logger.info(f"Creating mesh node with name: {node_name} using {radio_type} radio")
+
+    try:
+        # Use the provided identity instead of creating a new one
+        logger.info(
+            f"Using provided identity with public key: {identity.get_public_key().hex()[:16]}..."
+        )
+
+        # Create the radio (copied from common.py logic)
+        radio = create_radio(radio_type, serial_port)
+
+        # Initialize radio based on type
+        if radio_type == "kiss-tnc":
+            import time
+
+            time.sleep(1)  # Give KISS time to initialize
+            if hasattr(radio, "begin"):
+                radio.begin()
+            # Check KISS status
+            if hasattr(radio, "kiss_mode_active") and radio.kiss_mode_active:
+                logger.info("KISS mode is active")
+            else:
+                logger.warning("KISS mode may not be active")
+                print("Warning: KISS mode may not be active")
+        else:
+            logger.debug("Calling radio.begin()...")
+            radio.begin()
+            logger.info("Radio initialized successfully")
+
+        # Create a mesh node with the radio and identity
+        config = {"node": {"name": node_name}}
+        logger.debug(f"Creating MeshNode with config: {config}")
+        mesh_node = MeshNode(radio=radio, local_identity=identity, config=config)
+        logger.info(f"MeshNode created successfully: {node_name}")
+
+        return mesh_node, identity
+
+    except Exception as e:
+        logger.error(f"Failed to create mesh node: {e}")
+        raise
+
+
+# =============================================================================
+# HARDCODED EXAMPLE CREDENTIALS - FOR TESTING ONLY!
+# =============================================================================
+# Server identity (hardcoded for easy testing)
+# Use a deterministic seed to always generate the same identity
+EXAMPLE_SEED = bytes.fromhex("1111111111111111111111111111111111111111111111111111111111111111")
+
+# Example credentials
+EXAMPLE_ADMIN_PASSWORD = "admin123"
+EXAMPLE_GUEST_PASSWORD = "guest123"
+# =============================================================================
 
 # Permission levels
 PERM_ACL_GUEST = 0x01
@@ -58,7 +131,7 @@ class ClientInfo:
 class ClientACL:
     """
     Access Control List for managing authenticated clients.
-    
+
     Implements application-level authentication logic:
     - Password validation
     - Client state management
@@ -66,36 +139,37 @@ class ClientACL:
     - Replay attack detection
     """
 
-    def __init__(self, max_clients: int = 32, admin_password: str = "admin123", guest_password: str = "guest123"):
+    def __init__(
+        self,
+        max_clients: int = 32,
+        admin_password: str = "admin123",
+        guest_password: str = "guest123",
+    ):
         self.max_clients = max_clients
         self.admin_password = admin_password
         self.guest_password = guest_password
         self.clients: Dict[bytes, ClientInfo] = {}  # pub_key -> ClientInfo
 
     def authenticate_client(
-        self, 
-        client_identity: Identity, 
-        shared_secret: bytes, 
-        password: str, 
-        timestamp: int
+        self, client_identity: Identity, shared_secret: bytes, password: str, timestamp: int
     ) -> tuple[bool, int]:
         """
         Authenticate a client login request.
-        
+
         This is the authentication callback used by LoginServerHandler.
         It implements the application's password validation and ACL logic.
-        
+
         Args:
             client_identity: Client's identity
             shared_secret: ECDH shared secret for encryption
             password: Password provided by client
             timestamp: Timestamp from client request
-            
+
         Returns:
             (success: bool, permissions: int) - True/permissions on success, False/0 on failure
         """
         pub_key = client_identity.get_public_key()[:PUB_KEY_SIZE]
-        
+
         # Check for blank password (ACL-only authentication)
         if not password:
             client = self.clients.get(pub_key)
@@ -105,7 +179,7 @@ class ClientACL:
             # Client exists in ACL, allow login with existing permissions
             print(f"[ACL] ACL-based login for {pub_key[:6].hex()}...")
             return True, client.permissions
-        
+
         # Validate password
         permissions = 0
         if password == self.admin_password:
@@ -117,7 +191,7 @@ class ClientACL:
         else:
             print(f"[ACL] Invalid password")
             return False, 0
-        
+
         # Get or create client
         client = self.clients.get(pub_key)
         if client is None:
@@ -125,17 +199,19 @@ class ClientACL:
             if len(self.clients) >= self.max_clients:
                 print(f"[ACL] ACL full, cannot add client")
                 return False, 0
-            
+
             # Add new client
             client = ClientInfo(client_identity, 0)
             self.clients[pub_key] = client
             print(f"[ACL] Added new client {pub_key[:6].hex()}...")
-        
+
         # Check for replay attack
         if timestamp <= client.last_timestamp:
-            print(f"[ACL] Possible replay attack! timestamp={timestamp}, last={client.last_timestamp}")
+            print(
+                f"[ACL] Possible replay attack! timestamp={timestamp}, last={client.last_timestamp}"
+            )
             return False, 0
-        
+
         # Update client state
         client.last_timestamp = timestamp
         client.last_activity = int(time.time())
@@ -143,7 +219,7 @@ class ClientACL:
         client.permissions &= ~PERM_ACL_ROLE_MASK
         client.permissions |= permissions
         client.shared_secret = shared_secret
-        
+
         print(f"[ACL] Login success! Permissions: {'ADMIN' if client.is_admin() else 'GUEST'}")
         return True, client.permissions
 
@@ -171,8 +247,9 @@ class ClientACL:
 async def run_login_server(
     radio_type: str = "waveshare",
     serial_port: str = "/dev/ttyUSB0",
-    admin_password: str = "admin123",
-    guest_password: str = "guest123",
+    admin_password: str = EXAMPLE_ADMIN_PASSWORD,
+    guest_password: str = EXAMPLE_GUEST_PASSWORD,
+    use_hardcoded_identity: bool = True,
 ):
     """
     Run a login authentication server.
@@ -182,21 +259,30 @@ async def run_login_server(
         serial_port: Serial port for KISS TNC
         admin_password: Password for admin access
         guest_password: Password for guest access (empty string to disable)
+        use_hardcoded_identity: Use hardcoded identity for easy testing
     """
     print("=" * 60)
     print("PyMC Core - Login Server Example")
     print("=" * 60)
     print(f"Admin Password: {admin_password}")
     print(f"Guest Password: {guest_password if guest_password else '<disabled>'}")
+    print(f"Hardcoded Identity: {use_hardcoded_identity}")
     print("=" * 60)
 
-    # Create mesh node
-    mesh_node, identity = create_mesh_node("LoginServer", radio_type, serial_port)
+    # Create mesh node with optional hardcoded identity
+    if use_hardcoded_identity:
+        print("Using hardcoded example identity for easy testing...")
+        hardcoded_identity = LocalIdentity(seed=EXAMPLE_SEED)
+        mesh_node, identity = create_mesh_node_with_identity(
+            "LoginServer", radio_type, serial_port, hardcoded_identity
+        )
+    else:
+        mesh_node, identity = create_mesh_node("LoginServer", radio_type, serial_port)
 
     # Get our public key info
     our_pub_key = identity.get_public_key()
     our_hash = our_pub_key[0]
-    print(f"Server Identity: {our_pub_key[:6].hex()}...")
+    print(f"Server Identity: {our_pub_key.hex()}")
     print(f"Server Hash: 0x{our_hash:02X}")
     print()
 
@@ -253,7 +339,9 @@ async def run_login_server(
 
                     if cmd == "status":
                         print(f"\nACL Status:")
-                        print(f"   Authenticated clients: {acl.get_num_clients()}/{acl.max_clients}")
+                        print(
+                            f"   Authenticated clients: {acl.get_num_clients()}/{acl.max_clients}"
+                        )
                         print()
 
                     elif cmd == "list":
@@ -304,13 +392,18 @@ def main():
     )
     parser.add_argument(
         "--admin-password",
-        default="admin123",
-        help="Admin password (default: admin123)",
+        default=EXAMPLE_ADMIN_PASSWORD,
+        help=f"Admin password (default: {EXAMPLE_ADMIN_PASSWORD})",
     )
     parser.add_argument(
         "--guest-password",
-        default="guest123",
-        help="Guest password (default: guest123, empty to disable)",
+        default=EXAMPLE_GUEST_PASSWORD,
+        help=f"Guest password (default: {EXAMPLE_GUEST_PASSWORD}, empty to disable)",
+    )
+    parser.add_argument(
+        "--use-random-identity",
+        action="store_true",
+        help="Use random identity instead of hardcoded example identity",
     )
 
     args = parser.parse_args()
@@ -319,10 +412,23 @@ def main():
     if args.radio_type == "kiss-tnc":
         print(f"Serial port: {args.serial_port}")
 
+    # Show the identity that will be used
+    if not args.use_random_identity:
+        # Create a temporary identity to show what the keys will be
+        temp_identity = LocalIdentity(seed=EXAMPLE_SEED)
+        temp_pubkey = temp_identity.get_public_key()
+        print(f"Server Public Key: {temp_pubkey.hex()}")
+        print(f"Server Hash: 0x{temp_pubkey[0]:02X}")
+        print("(Use --use-random-identity to generate random keys instead)")
+
     try:
         asyncio.run(
             run_login_server(
-                args.radio_type, args.serial_port, args.admin_password, args.guest_password
+                args.radio_type,
+                args.serial_port,
+                args.admin_password,
+                args.guest_password,
+                use_hardcoded_identity=not args.use_random_identity,
             )
         )
     except KeyboardInterrupt:

@@ -30,10 +30,12 @@ class PathHandler:
         log_fn: Callable[[str], None],
         ack_handler=None,
         protocol_response_handler=None,
+        login_response_handler=None,
     ):
         self._log = log_fn
         self._ack_handler = ack_handler
         self._protocol_response_handler = protocol_response_handler
+        self._login_response_handler = login_response_handler
 
     @staticmethod
     def payload_type() -> int:
@@ -49,6 +51,10 @@ class PathHandler:
             # First, check if this PATH packet contains protocol responses
             if self._protocol_response_handler:
                 await self._protocol_response_handler(pkt)
+
+            # Then, check if this PATH packet contains login responses
+            if self._login_response_handler:
+                await self._login_response_handler(pkt)
 
             # Then, check if this PATH packet contains ACKs and delegate to ACK handler
             if self._ack_handler:

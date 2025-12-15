@@ -16,10 +16,7 @@ import time
 from typing import Callable, Optional
 
 from ...protocol import CryptoUtils, Identity, Packet, PacketBuilder
-from ...protocol.constants import (
-    PAYLOAD_TYPE_ANON_REQ,
-    PAYLOAD_TYPE_RESPONSE,
-)
+from ...protocol.constants import PAYLOAD_TYPE_ANON_REQ, PAYLOAD_TYPE_RESPONSE
 from .base import BaseHandler
 
 # Response codes
@@ -87,6 +84,13 @@ class LoginServerHandler(BaseHandler):
     async def __call__(self, packet: Packet) -> None:
         """Handle ANON_REQ login packet from client."""
         try:
+            # Debug: Log packet routing info
+            path_data = list(packet.path[: packet.path_len]) if packet.path_len > 0 else []
+            self.log(
+                f"[LoginServer] Packet route flood: {packet.is_route_flood()}, "
+                f"path_len: {packet.path_len}, path: {path_data}"
+            )
+
             # Parse ANON_REQ structure: dest_hash(1) + client_pubkey(32) + encrypted_data
             if len(packet.payload) < 34:
                 self.log("[LoginServer] ANON_REQ packet too short")
@@ -140,14 +144,18 @@ class LoginServerHandler(BaseHandler):
             )
 
             if success:
-                self.log(f"[LoginServer] Authentication successful")
+                self.log("[LoginServer] Authentication successful")
                 # Send success response
                 await self._send_login_response(
-                    client_identity, shared_secret, packet.is_route_flood(), 
-                    RESP_SERVER_LOGIN_OK, permissions
+                    client_identity,
+                    shared_secret,
+                    packet.is_route_flood(),
+                    RESP_SERVER_LOGIN_OK,
+                    permissions,
+                    packet,
                 )
             else:
-                self.log(f"[LoginServer] Authentication failed")
+                self.log("[LoginServer] Authentication failed")
                 # Optionally send failure response (or just ignore)
                 # Most implementations just ignore failed attempts
 
@@ -161,6 +169,7 @@ class LoginServerHandler(BaseHandler):
         is_flood: bool,
         response_code: int,
         permissions: int,
+        original_packet: Packet = None,
     ):
         """Build and send login response packet to client."""
         if self._send_packet_callback is None:
@@ -183,22 +192,56 @@ class LoginServerHandler(BaseHandler):
             struct.pack_into("<I", reply_data, 8, random.randint(0, 0xFFFFFFFF))  # random blob
             reply_data[12] = FIRMWARE_VER_LEVEL  # firmware version
 
-            # Create RESPONSE packet with encrypted reply data
-            response_pkt = PacketBuilder.create_datagram(
-                PAYLOAD_TYPE_RESPONSE,
-                client_identity,
-                self.local_identity,
-                shared_secret,
-                bytes(reply_data),
-                route_type="flood" if is_flood else "direct",
-            )
+            # Create response packet - different types based on original routing
+            if is_flood and original_packet:
+                # If original request came via flood, send PATH packet with return path
+                client_hash = client_identity.get_public_key()[0]
+                server_hash = self.local_identity.get_public_key()[0]
+                path_list = (
+                    list(original_packet.path[: original_packet.path_len])
+                    if original_packet.path_len > 0
+                    else []
+                )
+
+                self.log(
+                    f"[LoginServer] Creating PATH response: "
+                    f"client_hash=0x{client_hash:02X}, "
+                    f"server_hash=0x{server_hash:02X}, path={path_list}"
+                )
+
+                response_pkt = PacketBuilder.create_path_return(
+                    dest_hash=client_hash,
+                    src_hash=server_hash,
+                    secret=shared_secret,
+                    path=path_list,
+                    extra_type=PAYLOAD_TYPE_RESPONSE,
+                    extra=bytes(reply_data),
+                )
+                packet_type_name = "PATH"
+            else:
+                # If original request was direct, send regular RESPONSE packet
+                self.log(
+                    f"[LoginServer] Creating RESPONSE datagram: "
+                    f"is_flood={is_flood}, "
+                    f"path_len={original_packet.path_len if original_packet else 'None'}"
+                )
+
+                response_pkt = PacketBuilder.create_datagram(
+                    PAYLOAD_TYPE_RESPONSE,
+                    client_identity,
+                    self.local_identity,
+                    shared_secret,
+                    bytes(reply_data),
+                    route_type="flood",  # Always use flood for sending (matches C++)
+                )
+                packet_type_name = "RESPONSE"
 
             # Send with delay (matches C++ SERVER_RESPONSE_DELAY)
             delay_ms = 300
             self._send_packet_callback(response_pkt, delay_ms)
 
             self.log(
-                f"[LoginServer] Sent login response to "
+                f"[LoginServer] Sent login response ({packet_type_name}) to "
                 f"{client_identity.get_public_key()[:6].hex()}..."
             )
 
