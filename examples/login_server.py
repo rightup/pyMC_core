@@ -11,9 +11,14 @@ The server supports:
 - Guest password authentication
 - ACL-based authentication (blank password)
 - Automatic response to login attempts
+
+This example implements the application-level authentication logic
+(password validation, ACL management, permission assignment).
+The handler (LoginServerHandler) performs only protocol operations.
 """
 
 import asyncio
+import time
 from typing import Dict, Optional
 
 from common import create_mesh_node
@@ -51,33 +56,100 @@ class ClientInfo:
 
 
 class ClientACL:
-    """Access Control List for managing authenticated clients."""
+    """
+    Access Control List for managing authenticated clients.
+    
+    Implements application-level authentication logic:
+    - Password validation
+    - Client state management
+    - Permission assignment
+    - Replay attack detection
+    """
 
-    def __init__(self, max_clients: int = 32):
+    def __init__(self, max_clients: int = 32, admin_password: str = "admin123", guest_password: str = "guest123"):
         self.max_clients = max_clients
+        self.admin_password = admin_password
+        self.guest_password = guest_password
         self.clients: Dict[bytes, ClientInfo] = {}  # pub_key -> ClientInfo
+
+    def authenticate_client(
+        self, 
+        client_identity: Identity, 
+        shared_secret: bytes, 
+        password: str, 
+        timestamp: int
+    ) -> tuple[bool, int]:
+        """
+        Authenticate a client login request.
+        
+        This is the authentication callback used by LoginServerHandler.
+        It implements the application's password validation and ACL logic.
+        
+        Args:
+            client_identity: Client's identity
+            shared_secret: ECDH shared secret for encryption
+            password: Password provided by client
+            timestamp: Timestamp from client request
+            
+        Returns:
+            (success: bool, permissions: int) - True/permissions on success, False/0 on failure
+        """
+        pub_key = client_identity.get_public_key()[:PUB_KEY_SIZE]
+        
+        # Check for blank password (ACL-only authentication)
+        if not password:
+            client = self.clients.get(pub_key)
+            if client is None:
+                print(f"[ACL] Blank password, sender not in ACL")
+                return False, 0
+            # Client exists in ACL, allow login with existing permissions
+            print(f"[ACL] ACL-based login for {pub_key[:6].hex()}...")
+            return True, client.permissions
+        
+        # Validate password
+        permissions = 0
+        if password == self.admin_password:
+            permissions = PERM_ACL_ADMIN
+            print(f"[ACL] Admin password validated")
+        elif self.guest_password and password == self.guest_password:
+            permissions = PERM_ACL_GUEST
+            print(f"[ACL] Guest password validated")
+        else:
+            print(f"[ACL] Invalid password")
+            return False, 0
+        
+        # Get or create client
+        client = self.clients.get(pub_key)
+        if client is None:
+            # Check capacity
+            if len(self.clients) >= self.max_clients:
+                print(f"[ACL] ACL full, cannot add client")
+                return False, 0
+            
+            # Add new client
+            client = ClientInfo(client_identity, 0)
+            self.clients[pub_key] = client
+            print(f"[ACL] Added new client {pub_key[:6].hex()}...")
+        
+        # Check for replay attack
+        if timestamp <= client.last_timestamp:
+            print(f"[ACL] Possible replay attack! timestamp={timestamp}, last={client.last_timestamp}")
+            return False, 0
+        
+        # Update client state
+        client.last_timestamp = timestamp
+        client.last_activity = int(time.time())
+        client.last_login_success = int(time.time())
+        client.permissions &= ~PERM_ACL_ROLE_MASK
+        client.permissions |= permissions
+        client.shared_secret = shared_secret
+        
+        print(f"[ACL] Login success! Permissions: {'ADMIN' if client.is_admin() else 'GUEST'}")
+        return True, client.permissions
 
     def get_client(self, pub_key: bytes) -> Optional[ClientInfo]:
         """Get client by public key."""
         return self.clients.get(pub_key[:PUB_KEY_SIZE])
-
-    def put_client(self, identity: Identity, permissions: int = 0) -> Optional[ClientInfo]:
-        """Add or update client in ACL."""
-        pub_key = identity.get_public_key()[:PUB_KEY_SIZE]
-
-        if pub_key in self.clients:
-            client = self.clients[pub_key]
-            if permissions != 0:
-                client.permissions = permissions
-            return client
-
-        if len(self.clients) >= self.max_clients:
-            return None  # ACL full
-
-        # Add new client
-        client = ClientInfo(identity, permissions)
-        self.clients[pub_key] = client
-        return client
 
     def get_num_clients(self) -> int:
         """Get number of clients in ACL."""
@@ -129,32 +201,13 @@ async def run_login_server(
     print()
 
     # Create ACL for managing authenticated clients
-    acl = ClientACL(max_clients=32)
+    acl = ClientACL(max_clients=32, admin_password=admin_password, guest_password=guest_password)
 
-    # Create login server handler
+    # Create login server handler with authentication callback
     login_handler = LoginServerHandler(
         local_identity=identity,
         log_fn=lambda msg: print(msg),
-        acl=acl,
-        admin_password=admin_password,
-        guest_password=guest_password,
-    )
-
-    # Set up login event callbacks
-    def on_login_success(client: ClientInfo, is_admin: bool):
-        """Called when a client successfully logs in."""
-        role = "ADMIN" if is_admin else "GUEST"
-        pub_key_hex = client.id.get_public_key()[:6].hex()
-        print(f"✓ Login Success: {pub_key_hex}... as {role}")
-        print(f"  Total clients in ACL: {login_handler.get_acl().get_num_clients()}")
-
-    def on_login_failure(sender_identity, reason: str):
-        """Called when a login attempt fails."""
-        pub_key_hex = sender_identity.get_public_key()[:6].hex()
-        print(f"✗ Login Failed: {pub_key_hex}... - {reason}")
-
-    login_handler.set_login_callbacks(
-        on_success=on_login_success, on_failure=on_login_failure
+        authenticate_callback=acl.authenticate_client,  # Delegate authentication to ACL
     )
 
     # Set up packet sending callback
@@ -199,13 +252,11 @@ async def run_login_server(
                     cmd = cmd.strip().lower()
 
                     if cmd == "status":
-                        acl = login_handler.get_acl()
                         print(f"\nACL Status:")
                         print(f"   Authenticated clients: {acl.get_num_clients()}/{acl.max_clients}")
                         print()
 
                     elif cmd == "list":
-                        acl = login_handler.get_acl()
                         clients = acl.get_all_clients()
                         print(f"\n👥 Authenticated Clients ({len(clients)}):")
                         if not clients:
@@ -230,7 +281,7 @@ async def run_login_server(
             await asyncio.sleep(1)
     except KeyboardInterrupt:
         print("\n\nShutting down login server...")
-        print(f"   Final ACL size: {login_handler.get_acl().get_num_clients()} clients")
+        print(f"   Final ACL size: {acl.get_num_clients()} clients")
 
 
 def main():
