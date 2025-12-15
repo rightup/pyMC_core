@@ -232,7 +232,7 @@ class LoginServerHandler(BaseHandler):
                     self.local_identity,
                     shared_secret,
                     bytes(reply_data),
-                    route_type="flood",  # Always use flood for sending (matches C++)
+                    route_type="direct",  # Use direct routing for direct requests
                 )
                 packet_type_name = "RESPONSE"
 
