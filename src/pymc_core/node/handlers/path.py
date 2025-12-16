@@ -81,10 +81,19 @@ class PathHandler:
             # Extract and log key PATH information directly from packet
             try:
                 payload = pkt.get_payload()
+                hop_count = pkt.path_len
                 if len(payload) >= 2:
-                    hop_count = payload[1]
-                    self._log(f"PATH packet: hop_count={hop_count}, payload_len={len(payload)}")
-                    self._log(f"Path contains {hop_count} hops")
+                    dest_hash = payload[0]
+                    src_hash = payload[1]
+                    self._log(
+                        f"PATH packet: hop_count={hop_count}, "
+                        f"dest=0x{dest_hash:02X}, src=0x{src_hash:02X}, "
+                        f"payload_len={len(payload)}"
+                    )
+                    if hop_count > 0:
+                        self._log(f"Path contains {hop_count} hops")
+                    else:
+                        self._log("Direct PATH (no intermediate hops)")
                 else:
                     self._log("PATH packet received with minimal payload")
 

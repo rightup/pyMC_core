@@ -192,49 +192,45 @@ class LoginServerHandler(BaseHandler):
             struct.pack_into("<I", reply_data, 8, random.randint(0, 0xFFFFFFFF))  # random blob
             reply_data[12] = FIRMWARE_VER_LEVEL  # firmware version
 
-            # Create response packet - different types based on original routing
-            if is_flood and original_packet:
-                # If original request came via flood, send PATH packet with return path
-                client_hash = client_identity.get_public_key()[0]
-                server_hash = self.local_identity.get_public_key()[0]
-                path_list = (
-                    list(original_packet.path[: original_packet.path_len])
-                    if original_packet.path_len > 0
-                    else []
-                )
+            # Create response packet
+            # For ANON_REQ responses, the C++ client cannot decrypt regular RESPONSE
+            # datagrams because it doesn't have the server in its contacts list yet.
+            # The solution: ALWAYS send PATH packets for ANON_REQ responses, even for
+            # direct requests. The PATH format allows the client to process the response
+            # without needing the server as a known contact.
+            client_hash = client_identity.get_public_key()[0]
+            server_hash = self.local_identity.get_public_key()[0]
+            path_list = (
+                list(original_packet.path[: original_packet.path_len])
+                if original_packet and original_packet.path_len > 0
+                else []
+            )
 
-                self.log(
-                    f"[LoginServer] Creating PATH response: "
-                    f"client_hash=0x{client_hash:02X}, "
-                    f"server_hash=0x{server_hash:02X}, path={path_list}"
-                )
+            self.log(
+                f"[LoginServer] Creating PATH response: "
+                f"client_hash=0x{client_hash:02X}, "
+                f"server_hash=0x{server_hash:02X}, path={path_list}, "
+                f"original_flood={is_flood}"
+            )
 
-                response_pkt = PacketBuilder.create_path_return(
-                    dest_hash=client_hash,
-                    src_hash=server_hash,
-                    secret=shared_secret,
-                    path=path_list,
-                    extra_type=PAYLOAD_TYPE_RESPONSE,
-                    extra=bytes(reply_data),
-                )
-                packet_type_name = "PATH"
-            else:
-                # If original request was direct, send regular RESPONSE packet
-                self.log(
-                    f"[LoginServer] Creating RESPONSE datagram: "
-                    f"is_flood={is_flood}, "
-                    f"path_len={original_packet.path_len if original_packet else 'None'}"
-                )
+            response_pkt = PacketBuilder.create_path_return(
+                dest_hash=client_hash,
+                src_hash=server_hash,
+                secret=shared_secret,
+                path=path_list,
+                extra_type=PAYLOAD_TYPE_RESPONSE,
+                extra=bytes(reply_data),
+            )
+            packet_type_name = "PATH"
 
-                response_pkt = PacketBuilder.create_datagram(
-                    PAYLOAD_TYPE_RESPONSE,
-                    client_identity,
-                    self.local_identity,
-                    shared_secret,
-                    bytes(reply_data),
-                    route_type="direct",  # Use direct routing for direct requests
-                )
-                packet_type_name = "RESPONSE"
+            # Debug: Log packet details
+            self.log(
+                f"[LoginServer] RESPONSE packet details: "
+                f"header=0x{response_pkt.header:02X}, "
+                f"payload_len={response_pkt.payload_len}, "
+                f"path_len={response_pkt.path_len}, "
+                f"payload[0:2]={bytes(response_pkt.payload[:2]).hex()}"
+            )
 
             # Send with delay (matches C++ SERVER_RESPONSE_DELAY)
             delay_ms = 300
