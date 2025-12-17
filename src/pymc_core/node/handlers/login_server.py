@@ -123,9 +123,24 @@ class LoginServerHandler(BaseHandler):
                 self.log("[LoginServer] Decrypted data too short")
                 return
 
-            # Parse plaintext: timestamp(4) + password(variable)
+            # Parse plaintext - two formats:
+            # Repeater format: timestamp(4) + password(variable)
+            # Room server format: timestamp(4) + sync_since(4) + password(variable)
             client_timestamp = struct.unpack("<I", plaintext[:4])[0]
-            password_bytes = plaintext[4:]
+
+            # Check if this is room server format (has sync_since field)
+            # Room server format will have at least 8 bytes before password
+            sync_since = None
+            if len(plaintext) >= 8:
+                # Try to detect room server format by checking if byte 8 could be start of password
+                # Room servers expect password at byte 8, repeaters at byte 4
+                # We'll parse both and let the authenticate callback decide
+                sync_since = struct.unpack("<I", plaintext[4:8])[0]
+                password_bytes = plaintext[8:]
+                self.log(f"[LoginServer] Detected room server format: sync_since={sync_since}")
+            else:
+                # Repeater format - password starts at byte 4
+                password_bytes = plaintext[4:]
 
             # Null-terminate password
             null_idx = password_bytes.find(b"\x00")
@@ -138,10 +153,20 @@ class LoginServerHandler(BaseHandler):
                 f"password={'<empty>' if not password else '<provided>'}"
             )
 
-            # Call application authentication logic
-            success, permissions = self.authenticate(
-                client_identity, shared_secret, password, client_timestamp
-            )
+            # Call application authentication logic with optional sync_since parameter
+            # For backwards compatibility, check if authenticate accepts sync_since
+            import inspect
+
+            sig = inspect.signature(self.authenticate)
+            if "sync_since" in sig.parameters:
+                success, permissions = self.authenticate(
+                    client_identity, shared_secret, password, client_timestamp, sync_since
+                )
+            else:
+                # Old signature without sync_since
+                success, permissions = self.authenticate(
+                    client_identity, shared_secret, password, client_timestamp
+                )
 
             if success:
                 self.log("[LoginServer] Authentication successful")
