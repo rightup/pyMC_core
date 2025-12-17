@@ -389,7 +389,7 @@ class PacketBuilder:
         if ptype not in (PAYLOAD_TYPE_TXT_MSG, PAYLOAD_TYPE_REQ, PAYLOAD_TYPE_RESPONSE):
             raise ValueError("invalid payload type")
 
-        aes_key = CryptoUtils.sha256(secret)
+        aes_key = secret[:16]
         cipher = PacketBuilder._encrypt_payload(aes_key, secret, plaintext)
         payload = PacketBuilder._hash_bytes(dest.get_public_key(), local_identity) + cipher
 
