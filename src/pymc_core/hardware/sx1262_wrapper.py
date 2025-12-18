@@ -211,7 +211,9 @@ class SX1262Radio(LoRaRadio):
     def _basic_radio_setup(self, use_busy_check: bool = False) -> bool:
         """Common radio setup: reset, standby, and LoRa packet type"""
         self.lora.reset()
+        time.sleep(0.01)  # Give hardware time to complete reset
         self.lora.setStandby(self.lora.STANDBY_RC)
+        time.sleep(0.01)  # Give hardware time to enter standby mode
 
         # Check if standby mode was set correctly (different methods for different boards)
         if use_busy_check:
@@ -811,6 +813,7 @@ class SX1262Radio(LoRaRadio):
         """Prepare radio hardware for transmission. Returns True if successful."""
         self._tx_done_event.clear()
         self.lora.setStandby(self.lora.STANDBY_RC)
+        await asyncio.sleep(self.RADIO_TIMING_DELAY)  # Give hardware time to enter standby
         if self.lora.busyCheck():
             busy_wait = 0
             while self.lora.busyCheck() and busy_wait < 20:
@@ -1280,6 +1283,7 @@ class SX1262Radio(LoRaRadio):
         try:
             # Put radio in standby mode before CAD configuration
             self.lora.setStandby(self.lora.STANDBY_RC)
+            await asyncio.sleep(0.01)  # Give hardware time to enter standby
 
             # Clear any existing interrupt flags
             existing_irq = self.lora.getIrqStatus()
@@ -1300,6 +1304,7 @@ class SX1262Radio(LoRaRadio):
 
             self._cad_event.clear()
             self.lora.setCad()
+            await asyncio.sleep(0.01)  # Give hardware time to start CAD operation
 
             logger.debug(
                 f"CAD operation started - checking channel with peak={det_peak}, min={det_min}"
