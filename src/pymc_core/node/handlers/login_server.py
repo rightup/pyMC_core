@@ -128,6 +128,10 @@ class LoginServerHandler(BaseHandler):
             # Room server format: timestamp(4) + sync_since(4) + password(variable)
             client_timestamp = struct.unpack("<I", plaintext[:4])[0]
 
+            # Debug: Log plaintext details
+            self.log(f"[LoginServer] Plaintext length: {len(plaintext)} bytes")
+            self.log(f"[LoginServer] Plaintext hex: {plaintext.hex()}")
+
             # Check if this is room server format (has sync_since field)
             # Room server format will have at least 8 bytes before password
             sync_since = None
