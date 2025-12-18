@@ -62,6 +62,7 @@ class LoginServerHandler(BaseHandler):
         local_identity,
         log_fn: Callable[[str], None],
         authenticate_callback: Callable[[Identity, bytes, str, int], tuple[bool, int]],
+        is_room_server: bool = False,
     ):
         """
         Initialize login server handler.
@@ -71,10 +72,13 @@ class LoginServerHandler(BaseHandler):
             log_fn: Logging function
             authenticate_callback: Function(client_identity, shared_secret, password, timestamp)
                                    Returns: (success: bool, permissions: int)
+            is_room_server: True if this identity is a room server (expects sync_since field),
+                           False if repeater (no sync_since field)
         """
         self.local_identity = local_identity
         self.log = log_fn
         self.authenticate = authenticate_callback
+        self.is_room_server = is_room_server
         self._send_packet_callback: Optional[Callable[[Packet, int], None]] = None
 
     def set_send_packet_callback(self, callback: Callable[[Packet, int], None]):
@@ -124,27 +128,29 @@ class LoginServerHandler(BaseHandler):
                 return
 
             # Parse plaintext - two formats:
-            # Repeater format: timestamp(4) + password(variable)
-            # Room server format: timestamp(4) + sync_since(4) + password(variable)
+            # Repeater format: timestamp(4) + password(variable) + null
+            # Room server format: timestamp(4) + sync_since(4) + password(variable) + null
             client_timestamp = struct.unpack("<I", plaintext[:4])[0]
 
-            # Debug: Log plaintext details
-            self.log(f"[LoginServer] Plaintext length: {len(plaintext)} bytes")
-            self.log(f"[LoginServer] Plaintext hex: {plaintext.hex()}")
-
-            # Check if this is room server format (has sync_since field)
-            # Room server format will have at least 8 bytes before password
+            # Find null terminator
+            null_idx = plaintext.find(b"\x00", 4)  # Start searching from byte 4
+            if null_idx == -1:
+                null_idx = len(plaintext)  # No null found, use end of data
+            
+            # Use explicit identity type to determine format
             sync_since = None
-            if len(plaintext) >= 8:
-                # Try to detect room server format by checking if byte 8 could be start of password
-                # Room servers expect password at byte 8, repeaters at byte 4
-                # We'll parse both and let the authenticate callback decide
+            if self.is_room_server:
+                # Room server format: sync_since(4) + password
+                if len(plaintext) < 8:
+                    self.log("[LoginServer] Room server packet too short for sync_since field")
+                    return
                 sync_since = struct.unpack("<I", plaintext[4:8])[0]
-                password_bytes = plaintext[8:]
-                self.log(f"[LoginServer] Detected room server format: sync_since={sync_since}")
+                password_bytes = plaintext[8:null_idx]
+                self.log(f"[LoginServer] Room server format: sync_since={sync_since}")
             else:
-                # Repeater format - password starts at byte 4
-                password_bytes = plaintext[4:]
+                # Repeater format: password only
+                password_bytes = plaintext[4:null_idx]
+                self.log(f"[LoginServer] Repeater format detected: null at {null_idx}")
 
             # Null-terminate password
             null_idx = password_bytes.find(b"\x00")
