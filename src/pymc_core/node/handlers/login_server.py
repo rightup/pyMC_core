@@ -132,10 +132,16 @@ class LoginServerHandler(BaseHandler):
             # Room server format: timestamp(4) + sync_since(4) + password(variable) + null
             client_timestamp = struct.unpack("<I", plaintext[:4])[0]
 
+            # Debug logging
+            self.log(f"[LoginServer] Plaintext hex: {plaintext.hex()}")
+            self.log(f"[LoginServer] Plaintext length: {len(plaintext)} bytes")
+
             # Find null terminator
             null_idx = plaintext.find(b"\x00", 4)  # Start searching from byte 4
             if null_idx == -1:
                 null_idx = len(plaintext)  # No null found, use end of data
+            
+            self.log(f"[LoginServer] First null at position {null_idx}")
             
             # Use explicit identity type to determine format
             sync_since = None
@@ -146,11 +152,12 @@ class LoginServerHandler(BaseHandler):
                     return
                 sync_since = struct.unpack("<I", plaintext[4:8])[0]
                 password_bytes = plaintext[8:null_idx]
-                self.log(f"[LoginServer] Room server format: sync_since={sync_since}")
+                self.log(f"[LoginServer] Room server format: sync_since={sync_since}, extracting password from byte 8 to {null_idx}")
+                self.log(f"[LoginServer] Password bytes hex: {password_bytes.hex() if len(password_bytes) > 0 else '(empty)'}")
             else:
                 # Repeater format: password only
                 password_bytes = plaintext[4:null_idx]
-                self.log(f"[LoginServer] Repeater format detected: null at {null_idx}")
+                self.log(f"[LoginServer] Repeater format: extracting password from byte 4 to {null_idx}")
 
             # Null-terminate password
             null_idx = password_bytes.find(b"\x00")
