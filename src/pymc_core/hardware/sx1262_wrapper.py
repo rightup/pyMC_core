@@ -370,9 +370,11 @@ class SX1262Radio(LoRaRadio):
                                     payloadLengthRx,
                                     rxStartBufferPointer,
                                 ) = self.lora.getRxBufferStatus()
-                                packet_rssi_dbm, snr_db, signal_rssi_dbm = (
-                                    self.lora.getSignalMetrics()
-                                )
+                                (
+                                    packet_rssi_dbm,
+                                    snr_db,
+                                    signal_rssi_dbm,
+                                ) = self.lora.getSignalMetrics()
                                 self.last_rssi = int(packet_rssi_dbm)
                                 self.last_snr = snr_db
                                 self.last_signal_rssi = int(signal_rssi_dbm)
@@ -809,8 +811,8 @@ class SX1262Radio(LoRaRadio):
         if existing_irq != 0:
             self.lora.clearIrqStatus(existing_irq)
 
-    async def _prepare_radio_for_tx(self) -> bool:
-        """Prepare radio hardware for transmission. Returns True if successful."""
+    async def _prepare_radio_for_tx(self) -> tuple[bool, list[float]]:
+        """Prepare radio hardware for transmission. Returns (success, lbt_backoff_delays_ms)."""
         self._tx_done_event.clear()
         self.lora.setStandby(self.lora.STANDBY_RC)
         await asyncio.sleep(self.RADIO_TIMING_DELAY)  # Give hardware time to enter standby
@@ -823,6 +825,8 @@ class SX1262Radio(LoRaRadio):
         # Listen Before Talk (LBT) - Check for channel activity using CAD
         lbt_attempts = 0
         max_lbt_attempts = 5
+        lbt_backoff_delays = []  # Track each backoff delay in ms
+
         while lbt_attempts < max_lbt_attempts:
             try:
                 # Perform CAD with your custom thresholds
@@ -842,6 +846,9 @@ class SX1262Radio(LoRaRadio):
                         backoff_ms = base_delay * (2 ** (lbt_attempts - 1))
                         # Cap at 5 seconds maximum
                         backoff_ms = min(backoff_ms, 5000)
+
+                        # Record this backoff delay
+                        lbt_backoff_delays.append(float(backoff_ms))
 
                         logger.debug(
                             f"CAD backoff - waiting {backoff_ms}ms before retry "
@@ -868,9 +875,9 @@ class SX1262Radio(LoRaRadio):
                 busy_timeout += 1
             if self.lora.busyCheck():
                 logger.error("Radio stayed busy - cannot start transmission")
-                return False
+                return False, lbt_backoff_delays
 
-        return True
+        return True, lbt_backoff_delays
 
     def _control_tx_rx_pins(self, tx_mode: bool) -> None:
         """Control TXEN/RXEN pins for the E22 module (simple and deterministic)."""
@@ -1009,20 +1016,22 @@ class SX1262Radio(LoRaRadio):
         except Exception as e:
             logger.warning(f"[TX->RX] Failed to restore RX mode after TX: {e}")
 
-    async def send(self, data: bytes) -> None:
-        """Send a packet asynchronously"""
+    async def send(self, data: bytes) -> dict:
+        """Send a packet asynchronously. Returns transmission metadata including LBT metrics."""
         if not self._initialized or self.lora is None:
             logger.error("Radio not initialized")
-            return
+            return None
 
         async with self._tx_lock:
             try:
                 data_list = list(data)
                 length = len(data_list)
 
-                # Calculate transmission timeout
+                # Calculate transmission timeout and airtime
                 final_timeout_ms, driver_timeout = self._calculate_tx_timeout(length)
                 timeout_seconds = (final_timeout_ms / 1000.0) + 0.5  # Add margin
+                # Airtime is the timeout minus the 1000ms margin we add
+                airtime_ms = final_timeout_ms - 1000
 
                 self._prepare_packet_transmission(data_list, length)
 
@@ -1031,8 +1040,10 @@ class SX1262Radio(LoRaRadio):
                     f"(tOut={driver_timeout}) for {length} bytes"
                 )
 
-                if not await self._prepare_radio_for_tx():
-                    return
+                # Prepare for TX and capture LBT metrics
+                tx_ready, lbt_backoff_delays = await self._prepare_radio_for_tx()
+                if not tx_ready:
+                    return None
 
                 # Setup TX interrupts AFTER CAD checks (CAD changes interrupt config)
                 self._setup_tx_interrupts()
@@ -1040,19 +1051,27 @@ class SX1262Radio(LoRaRadio):
                 self.lora.setTxPower(self.tx_power, self.lora.TX_POWER_SX1262)
 
                 if not await self._execute_transmission(driver_timeout):
-                    return
+                    return None
 
                 if not await self._wait_for_transmission_complete(timeout_seconds):
-                    return
+                    return None
 
                 self._finalize_transmission()
 
                 # Trigger TX LED
                 self._gpio_manager.blink_led(self.txled_pin)
 
+                # Build and return transmission metadata
+                return {
+                    "airtime_ms": airtime_ms,
+                    "lbt_attempts": len(lbt_backoff_delays),
+                    "lbt_backoff_delays_ms": lbt_backoff_delays,
+                    "lbt_channel_busy": len(lbt_backoff_delays) > 0,
+                }
+
             except Exception as e:
                 logger.error(f"Failed to send packet: {e}")
-                return
+                return None
             finally:
                 # Always leave radio in RX continuous mode after TX
                 await self._restore_rx_mode()

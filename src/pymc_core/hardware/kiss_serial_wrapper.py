@@ -66,7 +66,8 @@ class KissSerialWrapper(LoRaRadio):
         Initialize KISS Serial Wrapper
 
         Args:
-            port: Serial port device path (e.g., '/dev/ttyUSB0', '/dev/cu.usbserial-0001', 'comm1', etc.)
+            port: Serial port device path (e.g., '/dev/ttyUSB0',
+            '/dev/cu.usbserial-0001', 'comm1', etc.)
             baudrate: Serial communication baud rate (default: 115200)
             timeout: Serial read timeout in seconds (default: 1.0)
             kiss_port: KISS port number (0-15, default: 0)
@@ -476,7 +477,7 @@ class KissSerialWrapper(LoRaRadio):
 
     async def send(self, data: bytes) -> None:
         """
-        Send data via KISS TNC
+        Send data via KISS TNC. Returns None (no metadata available).
 
         Args:
             data: Data to send
@@ -487,6 +488,7 @@ class KissSerialWrapper(LoRaRadio):
         success = self.send_frame(data)
         if not success:
             raise Exception("Failed to send frame via KISS TNC")
+        return None
 
     async def wait_for_rx(self) -> bytes:
         """

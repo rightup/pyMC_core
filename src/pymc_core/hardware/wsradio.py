@@ -114,6 +114,7 @@ class WsRadio(LoRaRadio):
         # Connection will be established when needed
 
     async def send(self, data: bytes):
+        """Send packet via WebSocket. Returns None (no metadata available)."""
         await self._ensure()
         try:
             if self.ws is not None and self._connected:
