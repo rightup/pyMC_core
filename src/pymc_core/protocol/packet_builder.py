@@ -12,8 +12,8 @@ from .constants import (
     ADVERT_FLAG_HAS_NAME,
     ADVERT_FLAG_IS_CHAT_NODE,
     CIPHER_BLOCK_SIZE,
-    MAX_ADVERT_DATA_SIZE,
     CONTACT_TYPE_ROOM_SERVER,
+    MAX_ADVERT_DATA_SIZE,
     MAX_PACKET_PAYLOAD,
     MAX_PATH_SIZE,
     PAYLOAD_TYPE_ACK,
@@ -389,12 +389,15 @@ class PacketBuilder:
         if ptype not in (PAYLOAD_TYPE_TXT_MSG, PAYLOAD_TYPE_REQ, PAYLOAD_TYPE_RESPONSE):
             raise ValueError("invalid payload type")
 
-        aes_key = CryptoUtils.sha256(secret)
+        aes_key = secret[:16]
         cipher = PacketBuilder._encrypt_payload(aes_key, secret, plaintext)
         payload = PacketBuilder._hash_bytes(dest.get_public_key(), local_identity) + cipher
 
         header = PacketBuilder._create_header(ptype, route_type)
-        return PacketBuilder._create_packet(header, payload)
+        pkt = PacketBuilder._create_packet(header, payload)
+        pkt.path_len = 0
+        pkt.path = bytearray()
+        return pkt
 
     @staticmethod
     def create_anon_req(
@@ -901,7 +904,8 @@ class PacketBuilder:
 
         Args:
             tag: Random identifier to match responses (uint32_t).
-            filter_mask: Bitmask of node types to discover; the bit at position `node_type` is set to select that type (e.g., for ADV_TYPE_REPEATER=2, use (1 << 2) == 0x04).
+            filter_mask: Bitmask of node types to discover; the bit at position `node_type` is set
+                to select that type (e.g., for ADV_TYPE_REPEATER=2, use (1 << 2) == 0x04).
             since: Optional timestamp - only nodes modified after this respond (uint32_t).
             prefix_only: Request 8-byte key prefix instead of full 32-byte key.
 
@@ -919,21 +923,21 @@ class PacketBuilder:
         """
         # Build payload: type+flags(1) + filter(1) + tag(4) + since(4, optional)
         payload = bytearray()
-        
+
         # First byte: CTL_TYPE_NODE_DISCOVER_REQ (0x80) + flags
         flags = 0x01 if prefix_only else 0x00
         payload.append(0x80 | flags)
-        
+
         # Filter byte
         payload.append(filter_mask & 0xFF)
-        
+
         # Tag (4 bytes, little-endian)
         payload.extend(struct.pack("<I", tag))
-        
+
         # Optional since timestamp (4 bytes, little-endian)
         if since > 0:
             payload.extend(struct.pack("<I", since))
-        
+
         # Create packet with direct routing (will be sent as zero-hop)
         pkt = Packet()
         pkt.header = PacketBuilder._create_header(PAYLOAD_TYPE_CONTROL, route_type="direct")
@@ -979,23 +983,23 @@ class PacketBuilder:
         """
         # Build payload: type+node_type(1) + snr(1) + tag(4) + pub_key(8 or 32)
         payload = bytearray()
-        
+
         # First byte: CTL_TYPE_NODE_DISCOVER_RESP (0x90) + node_type (lower 4 bits)
         payload.append(0x90 | (node_type & 0x0F))
-        
+
         # SNR byte (multiply by 4, clamp to signed int8_t range, and encode as unsigned byte)
         snr_byte = max(-128, min(127, int(inbound_snr * 4)))
         payload.append(snr_byte & 0xFF)
-        
+
         # Tag (4 bytes, little-endian)
         payload.extend(struct.pack("<I", tag))
-        
+
         # Public key (8 or 32 bytes)
         if prefix_only:
             payload.extend(pub_key[:8])
         else:
             payload.extend(pub_key[:32])
-        
+
         # Create packet with direct routing (will be sent as zero-hop)
         pkt = Packet()
         pkt.header = PacketBuilder._create_header(PAYLOAD_TYPE_CONTROL, route_type="direct")

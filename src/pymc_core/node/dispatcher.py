@@ -207,7 +207,9 @@ class Dispatcher:
         self.telemetry_response_handler = protocol_response_handler
 
         # PATH handler - for route discovery packets, with ACK and protocol response processing
-        path_handler = PathHandler(self._log, ack_handler, protocol_response_handler)
+        path_handler = PathHandler(
+            self._log, ack_handler, protocol_response_handler, login_response_handler
+        )
         self.register_handler(PathHandler.payload_type(), path_handler)
 
         # Login response handler for PAYLOAD_TYPE_RESPONSE packets
@@ -414,8 +416,9 @@ class Dispatcher:
         # ------------------------------------------------------------------ #
         self.state = DispatcherState.TRANSMIT
         raw = packet.write_to()
+        tx_metadata = None
         try:
-            await self.radio.send(raw)
+            tx_metadata = await self.radio.send(raw)
         except Exception as e:
             self._log(f"Radio transmit error: {e}")
             self.state = DispatcherState.IDLE
@@ -424,6 +427,10 @@ class Dispatcher:
         type_name = PAYLOAD_TYPES.get(payload_type, f"UNKNOWN_{payload_type}")
         route_name = ROUTE_TYPES.get(packet.get_route_type(), f"UNKNOWN_{packet.get_route_type()}")
         self._log(f"TX {packet.get_raw_length()} bytes (type={type_name}, route={route_name})")
+
+        # Store metadata on packet for access by handlers
+        if tx_metadata:
+            packet._tx_metadata = tx_metadata
 
         if self.packet_sent_callback:
             await self._invoke_callback(self.packet_sent_callback, packet)

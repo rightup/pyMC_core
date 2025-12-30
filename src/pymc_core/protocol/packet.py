@@ -112,6 +112,7 @@ class Packet:
         "_rssi",
         "_do_not_retransmit",
         "drop_reason",
+        "_tx_metadata",
     )
 
     def __init__(self):
@@ -285,13 +286,13 @@ class Packet:
         self._validate_lengths()
 
         out = bytearray([self.header])
-        
+
         # Add transport codes if this packet type requires them
         if self.has_transport_codes():
             # Pack two 16-bit transport codes (4 bytes total) in little-endian format
-            out.extend(self.transport_codes[0].to_bytes(2, 'little'))
-            out.extend(self.transport_codes[1].to_bytes(2, 'little'))
-        
+            out.extend(self.transport_codes[0].to_bytes(2, "little"))
+            out.extend(self.transport_codes[1].to_bytes(2, "little"))
+
         out.append(self.path_len)
         out += self.path
         out += self.payload[: self.payload_len]
@@ -322,8 +323,8 @@ class Packet:
         if self.has_transport_codes():
             self._check_bounds(idx, 4, data_len, "missing transport codes")
             # Unpack two 16-bit transport codes from little-endian format
-            self.transport_codes[0] = int.from_bytes(data[idx:idx+2], 'little')
-            self.transport_codes[1] = int.from_bytes(data[idx+2:idx+4], 'little')
+            self.transport_codes[0] = int.from_bytes(data[idx : idx + 2], "little")
+            self.transport_codes[1] = int.from_bytes(data[idx + 2 : idx + 4], "little")
             idx += 4
         else:
             self.transport_codes = [0, 0]

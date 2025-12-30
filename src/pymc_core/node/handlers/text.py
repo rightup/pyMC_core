@@ -69,6 +69,7 @@ class TextMessageHandler(BaseHandler):
         timestamp = decrypted[:4]  # First 4 bytes are the timestamp
         flags = decrypted[4]  # 5th byte contains flags
         attempt = flags & 0x03  # Last 2 bits are the attempt number
+        txt_type = (flags >> 2) & 0x3F  # Upper 6 bits are txt_type
         message_body = decrypted[5:]  # Rest is the message content
 
         pubkey = bytes.fromhex(matched_contact.public_key)
@@ -80,72 +81,81 @@ class TextMessageHandler(BaseHandler):
 
         self.log(
             f"Processing message - route_type: {route_type}, is_flood: {is_flood}, "
-            f"timestamp: {timestamp_int}"
+            f"timestamp: {timestamp_int}, txt_type: {txt_type}"
         )
 
-        # Create appropriate ACK response
-        if is_flood:
-            # FLOOD messages use PATH ACK responses with ACK hash in extra payload
-            text_bytes = message_body.rstrip(b"\x00")
+        # Skip ACK for TXT_TYPE_CLI_DATA (0x01) - CLI commands don't need ACKs
+        # Following C++ pattern: only TXT_TYPE_PLAIN (0x00) gets ACKs
+        TXT_TYPE_PLAIN = 0x00
+        TXT_TYPE_CLI_DATA = 0x01
+        send_ack = (txt_type == TXT_TYPE_PLAIN)
 
-            # Calculate ACK hash using standard method (same as DIRECT messages)
-            pack_data = PacketBuilder._pack_timestamp_data(timestamp_int, attempt, text_bytes)
-            ack_hash = CryptoUtils.sha256(pack_data + pubkey)[:4]
+        if send_ack:
+            # Create appropriate ACK response
+            if is_flood:
+                # FLOOD messages use PATH ACK responses with ACK hash in extra payload
+                text_bytes = message_body.rstrip(b"\x00")
 
-            # Create PATH ACK response
-            incoming_path = list(packet.path if hasattr(packet, "path") else [])
+                # Calculate ACK hash using standard method (same as DIRECT messages)
+                pack_data = PacketBuilder._pack_timestamp_data(timestamp_int, attempt, text_bytes)
+                ack_hash = CryptoUtils.sha256(pack_data + pubkey)[:4]
 
-            ack_packet = PacketBuilder.create_path_return(
-                dest_hash=PacketBuilder._hash_byte(pubkey),
-                src_hash=PacketBuilder._hash_byte(self.local_identity.get_public_key()),
-                secret=shared_secret,
-                path=incoming_path,
-                extra_type=PAYLOAD_TYPE_ACK,
-                extra=ack_hash,
-            )
+                # Create PATH ACK response
+                incoming_path = list(packet.path if hasattr(packet, "path") else [])
 
-            packet_len = len(ack_packet.write_to())
-            ack_airtime = PacketTimingUtils.estimate_airtime_ms(packet_len, self.radio_config)
-            ack_timeout_ms = PacketTimingUtils.calc_flood_timeout_ms(ack_airtime)
-
-            self.log(
-                f"FLOOD ACK timing - packet:{packet_len}B, airtime:{ack_airtime:.1f}ms, "
-                f"delay:{ack_timeout_ms:.1f}ms"
-            )
-            ack_timeout_ms = ack_timeout_ms / 1000.0  # Convert to seconds
-
-        else:
-            # DIRECT messages use discrete ACK packets
-            ack_packet = PacketBuilder.create_ack(
-                pubkey=pubkey,
-                timestamp=timestamp_int,
-                attempt=attempt,
-                text=message_body.rstrip(b"\x00"),
-            )
-
-            packet_len = len(ack_packet.write_to())
-            ack_airtime = PacketTimingUtils.estimate_airtime_ms(packet_len, self.radio_config)
-            ack_timeout_ms = PacketTimingUtils.calc_direct_timeout_ms(ack_airtime, 0)
-
-            self.log(
-                f"DIRECT ACK timing - packet:{packet_len}B, airtime:{ack_airtime:.1f}ms, "
-                f"delay:{ack_timeout_ms:.1f}ms, radio_config:{self.radio_config}"
-            )
-            ack_timeout_ms = ack_timeout_ms / 1000.0  # Convert to seconds
-
-        async def send_delayed_ack():
-            await asyncio.sleep(ack_timeout_ms)
-            try:
-                await self.send_packet(ack_packet, wait_for_ack=False)
-                self.log(
-                    f"ACK packet sent successfully (delayed {ack_timeout_ms*1000:.1f}ms) "
-                    f"for timestamp {timestamp_int}"
+                ack_packet = PacketBuilder.create_path_return(
+                    dest_hash=PacketBuilder._hash_byte(pubkey),
+                    src_hash=PacketBuilder._hash_byte(self.local_identity.get_public_key()),
+                    secret=shared_secret,
+                    path=incoming_path,
+                    extra_type=PAYLOAD_TYPE_ACK,
+                    extra=ack_hash,
                 )
-            except Exception as ack_send_error:
-                self.log(f"Failed to send ACK packet: {ack_send_error}")
 
-        # Schedule ACK to be sent after delay (non-blocking)
-        asyncio.create_task(send_delayed_ack())
+                packet_len = len(ack_packet.write_to())
+                ack_airtime = PacketTimingUtils.estimate_airtime_ms(packet_len, self.radio_config)
+                ack_timeout_ms = PacketTimingUtils.calc_flood_timeout_ms(ack_airtime)
+
+                self.log(
+                    f"FLOOD ACK timing - packet:{packet_len}B, airtime:{ack_airtime:.1f}ms, "
+                    f"delay:{ack_timeout_ms:.1f}ms"
+                )
+                ack_timeout_ms = ack_timeout_ms / 1000.0  # Convert to seconds
+
+            else:
+                # DIRECT messages use discrete ACK packets
+                ack_packet = PacketBuilder.create_ack(
+                    pubkey=pubkey,
+                    timestamp=timestamp_int,
+                    attempt=attempt,
+                    text=message_body.rstrip(b"\x00"),
+                )
+
+                packet_len = len(ack_packet.write_to())
+                ack_airtime = PacketTimingUtils.estimate_airtime_ms(packet_len, self.radio_config)
+                ack_timeout_ms = PacketTimingUtils.calc_direct_timeout_ms(ack_airtime, 0)
+
+                self.log(
+                    f"DIRECT ACK timing - packet:{packet_len}B, airtime:{ack_airtime:.1f}ms, "
+                    f"delay:{ack_timeout_ms:.1f}ms, radio_config:{self.radio_config}"
+                )
+                ack_timeout_ms = ack_timeout_ms / 1000.0  # Convert to seconds
+
+            async def send_delayed_ack():
+                await asyncio.sleep(ack_timeout_ms)
+                try:
+                    await self.send_packet(ack_packet, wait_for_ack=False)
+                    self.log(
+                        f"ACK packet sent successfully (delayed {ack_timeout_ms*1000:.1f}ms) "
+                        f"for timestamp {timestamp_int}"
+                    )
+                except Exception as ack_send_error:
+                    self.log(f"Failed to send ACK packet: {ack_send_error}")
+
+            # Schedule ACK to be sent after delay (non-blocking)
+            asyncio.create_task(send_delayed_ack())
+        else:
+            self.log(f"Skipping ACK for txt_type={txt_type} (CLI command)")
 
         decoded_msg = message_body.decode("utf-8", "replace")
         self.log(f"Received TXT_MSG: {decoded_msg}")
