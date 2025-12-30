@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+from typing import Optional
 
-def snr_register_to_db(raw_value: int | None, *, bits: int = 8) -> float:
+
+def snr_register_to_db(raw_value: Optional[int], *, bits: int = 8) -> float:
     """Convert signed SX126x/SX127x SNR register (value * 4) into dB.
 
     Args:

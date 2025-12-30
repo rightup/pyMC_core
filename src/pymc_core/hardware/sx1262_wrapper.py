@@ -8,7 +8,7 @@ import logging
 import math
 import random
 import time
-from typing import Optional
+from typing import Optional, Union
 
 from .base import LoRaRadio
 from .gpio_manager import GPIOPinManager
@@ -1275,11 +1275,11 @@ class SX1262Radio(LoRaRadio):
 
     async def perform_cad(
         self,
-        det_peak: int | None = None,
-        det_min: int | None = None,
+        det_peak: Optional[int] = None,
+        det_min: Optional[int] = None,
         timeout: float = 1.0,
         calibration: bool = False,
-    ) -> bool | dict:
+    ) -> Union[bool, dict]:
         """
         Perform Channel Activity Detection (CAD).
         If calibration=True, uses provided thresholds and returns info.

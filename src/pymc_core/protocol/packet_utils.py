@@ -5,7 +5,7 @@ Consolidates common operations between Packet and PacketBuilder classes.
 
 import hashlib
 import struct
-from typing import Any, List, Union
+from typing import Any, List, Optional, Union
 
 from .constants import (
     MAX_HASH_SIZE,
@@ -223,7 +223,7 @@ class PacketHashingUtils:
         payload_type: int,
         path_len: int,
         payload: bytes,
-        length: int | None = None,
+        length: Optional[int] = None,
     ) -> str:
         """
         Return upper-case hex string representation of the packet hash.
