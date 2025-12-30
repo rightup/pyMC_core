@@ -49,6 +49,8 @@ PAYLOAD_TYPES = {
     0x07: "ANON_REQ",
     0x08: "PATH",
     0x09: "TRACE",
+    0x0A: "MULTIPART",
+    0x0B: "CONTROL",
     0x0F: "RAW_CUSTOM",
 }
 
@@ -148,29 +150,23 @@ def determine_contact_type_from_flags(flags: int) -> int:
         ADVERT_FLAG_IS_ROOM_SERVER,
     )
 
-    is_chat = bool(flags & ADVERT_FLAG_IS_CHAT_NODE)
-    is_repeater = bool(flags & ADVERT_FLAG_IS_REPEATER)
-    is_room_server = bool(flags & ADVERT_FLAG_IS_ROOM_SERVER)
-    if is_room_server:
+    # Extract node type from bits 0-3 (mask with 0x0F)
+    node_type = flags & 0x0F
+
+    if node_type == ADVERT_FLAG_IS_ROOM_SERVER:  # 0x03
         return 3  # CONTACT_TYPE_ROOM_SERVER
-    elif is_repeater and is_chat:
-        return 4  # CONTACT_TYPE_HYBRID
-    elif is_repeater:
+    elif node_type == ADVERT_FLAG_IS_REPEATER:  # 0x02
         return 2  # CONTACT_TYPE_REPEATER
-    elif is_chat:
+    elif node_type == ADVERT_FLAG_IS_CHAT_NODE:  # 0x01
         return 1  # CONTACT_TYPE_CHAT_NODE
+    elif node_type == 0x04:  # Sensor (if defined)
+        return 5  # CONTACT_TYPE_SENSOR (you may need to add this constant)
     else:
         return 0  # CONTACT_TYPE_UNKNOWN
 
 
 def get_contact_type_name(contact_type: int) -> str:
-    type_names = {
-        0: "Unknown",
-        1: "Chat Node",
-        2: "Repeater",
-        3: "Room Server",
-        4: "Hybrid Node",
-    }
+    type_names = {0: "Unknown", 1: "Chat Node", 2: "Repeater", 3: "Room Server", 4: "Sensor"}
     return type_names.get(contact_type, f"Unknown Type ({contact_type})")
 
 

@@ -14,7 +14,7 @@ from pymc_core.node.handlers import (
     TextMessageHandler,
     TraceHandler,
 )
-from pymc_core.protocol import LocalIdentity, Packet
+from pymc_core.protocol import LocalIdentity, Packet, PacketBuilder
 from pymc_core.protocol.constants import (
     PAYLOAD_TYPE_ACK,
     PAYLOAD_TYPE_ADVERT,
@@ -24,18 +24,27 @@ from pymc_core.protocol.constants import (
     PAYLOAD_TYPE_RESPONSE,
     PAYLOAD_TYPE_TRACE,
     PAYLOAD_TYPE_TXT_MSG,
+    PUB_KEY_SIZE,
+    SIGNATURE_SIZE,
+    TIMESTAMP_SIZE,
 )
 
 
 # Mock classes for testing
 class MockContact:
-    def __init__(self, public_key="0123456789abcdef0123456789abcdef"):
+    def __init__(self, public_key="0123456789abcdef0123456789abcdef", name="mock"):
         self.public_key = public_key
+        self.name = name
+        self.last_advert = 0
 
 
 class MockContactBook:
     def __init__(self):
-        self.contacts = [MockContact()]
+        self.contacts = []
+        self.added_contacts = []
+
+    def add_contact(self, contact_data):
+        self.added_contacts.append(contact_data)
 
 
 class MockDispatcher:
@@ -49,6 +58,7 @@ class MockDispatcher:
 class MockEventService:
     def __init__(self):
         self.publish = AsyncMock()
+        self.publish_sync = MagicMock()
 
 
 # Base Handler Tests
@@ -167,13 +177,8 @@ class TestTextMessageHandler:
 # Advert Handler Tests
 class TestAdvertHandler:
     def setup_method(self):
-        self.contacts = MockContactBook()
         self.log_fn = MagicMock()
-        self.local_identity = LocalIdentity()
-        self.event_service = MockEventService()
-        self.handler = AdvertHandler(
-            self.contacts, self.log_fn, self.local_identity, self.event_service
-        )
+        self.handler = AdvertHandler(self.log_fn)
 
     def test_payload_type(self):
         """Test advert handler payload type."""
@@ -181,10 +186,49 @@ class TestAdvertHandler:
 
     def test_advert_handler_initialization(self):
         """Test advert handler initialization."""
-        assert self.handler.contacts == self.contacts
         assert self.handler.log == self.log_fn
-        assert self.handler.identity == self.local_identity
-        assert self.handler.event_service == self.event_service
+
+    @pytest.mark.asyncio
+    async def test_advert_handler_accepts_valid_signature(self):
+        remote_identity = LocalIdentity()
+        packet = PacketBuilder.create_advert(remote_identity, "RemoteNode")
+
+        result = await self.handler(packet)
+
+        assert result is not None
+        assert result["valid"] is True
+        assert result["public_key"] == remote_identity.get_public_key().hex()
+        assert result["name"] == "RemoteNode"
+
+    @pytest.mark.asyncio
+    async def test_advert_handler_rejects_invalid_signature(self):
+        remote_identity = LocalIdentity()
+        packet = PacketBuilder.create_advert(remote_identity, "RemoteNode")
+        appdata_offset = PUB_KEY_SIZE + TIMESTAMP_SIZE + SIGNATURE_SIZE + 5
+        if appdata_offset >= packet.payload_len:
+            appdata_offset = packet.payload_len - 1
+        packet.payload[appdata_offset] ^= 0x01
+
+        result = await self.handler(packet)
+
+        assert result is None
+        assert any(
+            "invalid signature" in call.args[0].lower()
+            for call in self.log_fn.call_args_list
+            if call.args
+        )
+
+    @pytest.mark.asyncio
+    async def test_advert_handler_ignores_self_advert(self):
+        """Test that handler processes self-advert (dispatcher handles filtering)."""
+        local_identity = LocalIdentity()
+        packet = PacketBuilder.create_advert(local_identity, "SelfNode")
+
+        result = await self.handler(packet)
+
+        # Handler should still return parsed data; dispatcher filters self-adverts
+        assert result is not None
+        assert result["name"] == "SelfNode"
 
 
 # Path Handler Tests
@@ -333,7 +377,7 @@ async def test_handlers_can_be_called():
     handlers = [
         AckHandler(log_fn),
         TextMessageHandler(local_identity, contacts, log_fn, send_packet_fn, event_service),
-        AdvertHandler(contacts, log_fn, local_identity, event_service),
+        AdvertHandler(log_fn),
         PathHandler(log_fn),
         GroupTextHandler(local_identity, contacts, log_fn, send_packet_fn),
         LoginResponseHandler(local_identity, contacts, log_fn),

@@ -9,7 +9,7 @@ class LoRaRadio(ABC):
 
     @abstractmethod
     async def send(self, data: bytes):
-        """Send a packet asynchronously."""
+        """Send a packet asynchronously. Returns transmission metadata dict or None."""
         pass
 
     @abstractmethod

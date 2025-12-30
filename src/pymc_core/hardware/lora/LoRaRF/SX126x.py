@@ -1,58 +1,64 @@
 import time
-
 import spidev
 
+from ...signal_utils import snr_register_to_db
 from .base import BaseLoRa
-
 spi = spidev.SpiDev()
+_gpio_manager = None
 
-from gpiozero import Device
-
-# Force gpiozero to use LGPIOFactory - no RPi.GPIO fallback
-from gpiozero.pins.lgpio import LGPIOFactory
-
-Device.pin_factory = LGPIOFactory()
-
-# GPIOZero helpers for pin management
-from gpiozero import DigitalInputDevice, DigitalOutputDevice
-
-_gpio_pins = {}
+def set_gpio_manager(gpio_manager):
+    """Set the GPIO manager instance to be used by this module"""
+    global _gpio_manager
+    _gpio_manager = gpio_manager
 
 
 def _get_output(pin):
-    if pin not in _gpio_pins:
-        _gpio_pins[pin] = DigitalOutputDevice(pin)
-    return _gpio_pins[pin]
+    """Get output pin via centralized GPIO manager (setup only if needed)"""
+    if _gpio_manager is None:
+        raise RuntimeError("GPIO manager not initialized. Call set_gpio_manager() first.")
+    # Only setup if pin doesn't exist yet
+    if pin not in _gpio_manager._pins:
+        _gpio_manager.setup_output_pin(pin, initial_value=True)
+    return _gpio_manager._pins[pin]
 
 
 def _get_input(pin):
-    if pin not in _gpio_pins:
-        _gpio_pins[pin] = DigitalInputDevice(pin)
-    return _gpio_pins[pin]
+    """Get input pin via centralized GPIO manager (setup only if needed)"""
+    if _gpio_manager is None:
+        raise RuntimeError("GPIO manager not initialized. Call set_gpio_manager() first.")
+    # Only setup if pin doesn't exist yet
+    if pin not in _gpio_manager._pins:
+        _gpio_manager.setup_input_pin(pin)
+    return _gpio_manager._pins[pin]
 
 
 def _get_output_safe(pin):
     """Get output pin safely - return None if GPIO busy"""
-    try:
-        if pin not in _gpio_pins:
-            _gpio_pins[pin] = DigitalOutputDevice(pin)
-        return _gpio_pins[pin]
-    except Exception as e:
-        if "GPIO busy" in str(e):
+    if _gpio_manager is None:
+        return None
+    # Only setup if pin doesn't exist yet
+    if pin not in _gpio_manager._pins:
+        if not _gpio_manager.setup_output_pin(pin, initial_value=True):
             return None
-        raise e
+    return _gpio_manager._pins.get(pin)
 
 
 def _get_input_safe(pin):
     """Get input pin safely - return None if GPIO busy"""
-    try:
-        if pin not in _gpio_pins:
-            _gpio_pins[pin] = DigitalInputDevice(pin)
-        return _gpio_pins[pin]
-    except Exception as e:
-        if "GPIO busy" in str(e):
+    if _gpio_manager is None:
+        return None
+    # Only setup if pin doesn't exist yet
+    if pin not in _gpio_manager._pins:
+        if not _gpio_manager.setup_input_pin(pin):
             return None
-        raise e
+    return _gpio_manager._pins.get(pin)
+
+
+def _rssi_register_to_dbm(raw_value):
+    """Convert RSSI register units (-0.5 dBm per LSB) into dBm."""
+    if raw_value is None:
+        return 0.0
+    return raw_value / -2.0
 
 
 class SX126x(BaseLoRa):
@@ -386,24 +392,17 @@ class SX126x(BaseLoRa):
         except Exception:
             pass
 
-        # Close all GPIO pins
-        global _gpio_pins
-        for pin_num, pin_obj in list(_gpio_pins.items()):
-            try:
-                pin_obj.close()
-            except Exception:
-                pass
-
-        _gpio_pins.clear()
+        # GPIO cleanup is handled by the centralized gpio_manager
+        # No need to close pins here as they're managed by GPIOPinManager
 
     def reset(self) -> bool:
         reset_pin = _get_output_safe(self._reset)
         if reset_pin is None:
             return True  # Continue if reset pin unavailable
 
-        reset_pin.off()
+        reset_pin.write(False)  # periphery: write(False) = LOW
         time.sleep(0.001)
-        reset_pin.on()
+        reset_pin.write(True)   # periphery: write(True) = HIGH
         return not self.busyCheck()
 
     def sleep(self, option=SLEEP_WARM_START):
@@ -417,7 +416,7 @@ class SX126x(BaseLoRa):
         if self._wake != -1:
             wake_pin = _get_output_safe(self._wake)
             if wake_pin:
-                wake_pin.off()
+                wake_pin.write(False)
                 time.sleep(0.0005)
         self.setStandby(self.STANDBY_RC)
         self._fixResistanceAntenna()
@@ -432,7 +431,7 @@ class SX126x(BaseLoRa):
             return False  # Assume not busy to continue
 
         t = time.time()
-        while busy_pin.value:
+        while busy_pin.read():  # periphery: read() returns True for HIGH
             if (time.time() - t) > (timeout / 1000):
                 return True
         return False
@@ -496,16 +495,12 @@ class SX126x(BaseLoRa):
         self._txen = txen
         self._rxen = rxen
         self._wake = wake
-        # gpiozero pins are initialized on first use by _get_output/_get_input
+        # periphery pins are initialized on first use by _get_output/_get_input
         _get_output(reset)
         _get_input(busy)
         _get_output(self._cs_define)
-        # Only create a DigitalInputDevice for IRQ if not already managed externally
-        # (e.g., by main driver with gpiozero.Button). This avoids double allocation errors.
-        # If you use a Button in the main driver, do NOT call _get_input here.
-        # Commented out to prevent double allocation:
-        # if irq != -1:
-        #     _get_input(irq)
+        # IRQ pin managed externally by sx1262_wrapper.py via gpio_manager
+        # Do NOT initialize it here to avoid double allocation
         if txen != -1:
             _get_output(txen)
         # if rxen != -1: _get_output(rxen)
@@ -573,57 +568,116 @@ class SX126x(BaseLoRa):
         self.setRfFrequency(rfFreq)
 
     def setTxPower(self, txPower: int, version=TX_POWER_SX1262):
-        #  maximum TX power is 22 dBm and 15 dBm for SX1261
+        # -----------------------------
+        # Chipset-specific hard limits
+        # -----------------------------
         if txPower > 22:
             txPower = 22
-        elif txPower > 15 and version == self.TX_POWER_SX1261:
+        if version == self.TX_POWER_SX1261 and txPower > 15:
             txPower = 15
+        if txPower < -17:
+            txPower = -17
 
+        # Default configuration
         paDutyCycle = 0x00
         hpMax = 0x00
         deviceSel = 0x00
-        power = 0x0E
-        if version == self.TX_POWER_SX1261:
-            deviceSel = 0x01
-        # set parameters for PA config and TX params configuration
-        if txPower == 22:
-            paDutyCycle = 0x04
-            hpMax = 0x07
-            power = 0x16
-        elif txPower >= 20:
-            paDutyCycle = 0x03
-            hpMax = 0x05
-            power = 0x16
-        elif txPower >= 17:
-            paDutyCycle = 0x02
-            hpMax = 0x03
-            power = 0x16
-        elif txPower >= 14 and version == self.TX_POWER_SX1261:
-            paDutyCycle = 0x04
-            hpMax = 0x00
-            power = 0x0E
-        elif txPower >= 14 and version == self.TX_POWER_SX1262:
-            paDutyCycle = 0x02
-            hpMax = 0x02
-            power = 0x16
-        elif txPower >= 14 and version == self.TX_POWER_SX1268:
-            paDutyCycle = 0x04
-            hpMax = 0x06
-            power = 0x0F
-        elif txPower >= 10 and version == self.TX_POWER_SX1261:
-            paDutyCycle = 0x01
-            hpMax = 0x00
-            power = 0x0D
-        elif txPower >= 10 and version == self.TX_POWER_SX1268:
-            paDutyCycle = 0x00
-            hpMax = 0x03
-            power = 0x0F
-        else:
-            return
+        paLut = 0x01
 
-        # set power amplifier and TX power configuration
-        self.setPaConfig(paDutyCycle, hpMax, deviceSel, 0x01)
-        self.setTxParams(power, self.PA_RAMP_800U)
+        # =============================
+        # SX1262 (E22 modules)
+        # =============================
+        if version == self.TX_POWER_SX1262:
+            # Per datasheet 13.4.4: power parameter is in dBm directly
+            powerReg = txPower
+
+            # Configure OCP (Over Current Protection) for high power only
+            # For high power (≥20 dBm), need 140 mA current limit
+            # For lower power, leave chip default (matches RadioLib behavior)
+            if txPower >= 20:
+                # High power: Set OCP to 140 mA
+                # Formula: I_max = 2.5 * (OCP + 1) mA
+                # 0x38 = 56 decimal → (56 + 1) * 2.5 = 142.5 mA
+                self.setCurrentProtection(0x38)  # 140 mA
+
+            # Matches RadioLib's SX1262::setOutputPower() implementation
+            deviceSel = 0x00  # SX1262 PA (0x00 for SX1262, 0x01 for SX1261)
+            paDutyCycle = 0x04  # Optimal duty cycle for high power
+            hpMax = 0x07  # Maximum clamping level (allows full +22 dBm)
+
+            # Note: For E22-900M30S modules, 22 dBm from SX1262 chip
+            #       → ~30 dBm (1W) output via external YP2233W PA
+
+        # =============================
+        # SX1261
+        # =============================
+        elif version == self.TX_POWER_SX1261:
+            deviceSel = 0x01
+
+            if txPower >= 14:
+                paDutyCycle = 0x04
+                hpMax = 0x00
+                powerReg = 14  # Cap at max
+            elif txPower >= 10:
+                paDutyCycle = 0x01
+                hpMax = 0x00
+                powerReg = txPower
+            else:
+                # Low power mode
+                paDutyCycle = 0x00
+                hpMax = 0x00
+                powerReg = txPower
+
+        # =============================
+        # SX1268
+        # =============================
+        elif version == self.TX_POWER_SX1268:
+            if txPower >= 14:
+                paDutyCycle = 0x04
+                hpMax = 0x06
+                powerReg = txPower
+                deviceSel = 0x01  # High power PA
+            elif txPower >= 10:
+                paDutyCycle = 0x00
+                hpMax = 0x03
+                powerReg = txPower
+                deviceSel = 0x00  # Low power PA
+            else:
+                paDutyCycle = 0x00
+                hpMax = 0x00
+                powerReg = txPower
+                deviceSel = 0x00
+
+        # =============================
+        # Unknown version (fallback)
+        # =============================
+        else:
+            if txPower == 22:
+                paDutyCycle = 0x04
+                hpMax = 0x07
+                deviceSel = 0x01
+                powerReg = 22
+            elif txPower >= 20:
+                paDutyCycle = 0x03
+                hpMax = 0x05
+                deviceSel = 0x01
+                powerReg = txPower
+            elif txPower >= 17:
+                paDutyCycle = 0x02
+                hpMax = 0x03
+                deviceSel = 0x01
+                powerReg = txPower
+            else:
+                paDutyCycle = 0x00
+                hpMax = 0x00
+                deviceSel = 0x00
+                powerReg = txPower
+
+        # =============================
+        # APPLY FINAL CONFIG
+        # =============================
+        self.setPaConfig(paDutyCycle, hpMax, deviceSel, paLut)
+        self.setTxParams(powerReg, self.PA_RAMP_40U)
 
     def setRxGain(self, rxGain):
         # set power saving or boosted gain in register
@@ -821,8 +875,8 @@ class SX126x(BaseLoRa):
         self.setBufferBaseAddress(self._bufferIndex, (self._bufferIndex + 0xFF) % 0xFF)
         # save current txen pin state and set txen pin to LOW
         if self._txen != -1:
-            self._txState = _get_output(self._txen).value
-            _get_output(self._txen).off()
+            self._txState = _get_output(self._txen).read()
+            _get_output(self._txen).write(False)
         self._fixLoRaBw500(self._bw)
 
     def endPacket(self, timeout: int = TX_SINGLE) -> bool:
@@ -900,11 +954,11 @@ class SX126x(BaseLoRa):
             self._statusWait = self.STATUS_RX_CONTINUOUS
         # save current txen pin state and set txen pin to high
         if self._txen != -1:
-            self._txState = _get_output(self._txen).value
-            _get_output(self._txen).on()
+            self._txState = _get_output(self._txen).read()
+            _get_output(self._txen).write(True)
         # set device to receive mode with configured timeout, single, or continuous operation
         self.setRx(rxTimeout)
-        # IRQ event handling should be implemented in the higher-level driver using gpiozero Button
+        # IRQ event handling should be implemented in the higher-level driver using periphery GPIO
         return True
 
     def listen(self, rxPeriod: int, sleepPeriod: int) -> bool:
@@ -925,11 +979,11 @@ class SX126x(BaseLoRa):
             sleepPeriod = 0x00FFFFFF
         # save current txen pin state and set txen pin to high
         if self._txen != -1:
-            self._txState = _get_output(self._txen).value
-            _get_output(self._txen).on()
+            self._txState = _get_output(self._txen).read()
+            _get_output(self._txen).write(True)
         # set device to receive mode with configured receive and sleep period
         self.setRxDutyCycle(rxPeriod, sleepPeriod)
-        # IRQ event handling should be implemented in the higher-level driver using gpiozero Button
+        # IRQ event handling should be implemented in the higher-level driver using periphery GPIO
         return True
 
     def available(self) -> int:
@@ -997,18 +1051,12 @@ class SX126x(BaseLoRa):
             # for transmit, calculate transmit time and set back txen pin to previous state
             self._transmitTime = time.time() - self._transmitTime
             if self._txen != -1:
-                if self._txState:
-                    _get_output(self._txen).on()
-                else:
-                    _get_output(self._txen).off()
+                _get_output(self._txen).write(self._txState)
         elif self._statusWait == self.STATUS_RX_WAIT:
             # for receive, get received payload length and buffer index and set back txen pin to previous state
             (self._payloadTxRx, self._bufferIndex) = self.getRxBufferStatus()
             if self._txen != -1:
-                if self._txState:
-                    _get_output(self._txen).on()
-                else:
-                    _get_output(self._txen).off()
+                _get_output(self._txen).write(self._txState)
             self._fixRxTimeout()
         elif self._statusWait == self.STATUS_RX_CONTINUOUS:
             # for receive continuous, get received payload length and buffer index and clear IRQ status
@@ -1052,19 +1100,26 @@ class SX126x(BaseLoRa):
 
     def packetRssi(self) -> float:
         # get relative signal strength index (RSSI) of last incoming package
-        (rssiPkt, snrPkt, signalRssiPkt) = self.getPacketStatus()
-        return rssiPkt / -2.0
+        rssi_dbm, _, _ = self.getSignalMetrics()
+        return rssi_dbm
 
     def snr(self) -> float:
         # get signal to noise ratio (SNR) of last incoming package
-        (rssiPkt, snrPkt, signalRssiPkt) = self.getPacketStatus()
-        if snrPkt > 127:
-            snrPkt = snrPkt - 256
-        return snrPkt / 4.0
+        _, snr_db, _ = self.getSignalMetrics()
+        return snr_db
 
     def signalRssi(self) -> float:
-        (rssiPkt, snrPkt, signalRssiPkt) = self.getPacketStatus()
-        return signalRssiPkt / -2.0
+        _, _, signal_rssi_dbm = self.getSignalMetrics()
+        return signal_rssi_dbm
+
+    def getSignalMetrics(self) -> tuple:
+        """Return RSSI, SNR, and signal RSSI (all in dB) for the last packet."""
+        rssiPkt, snrPkt, signalRssiPkt = self.getPacketStatus()
+        return (
+            _rssi_register_to_dbm(rssiPkt),
+            snr_register_to_db(snrPkt),
+            _rssi_register_to_dbm(signalRssiPkt),
+        )
 
     def rssiInst(self) -> float:
         return self.getRssiInst() / -2.0
@@ -1096,10 +1151,7 @@ class SX126x(BaseLoRa):
         self._transmitTime = time.time() - self._transmitTime
         # set back txen pin to previous state
         if self._txen != -1:
-            if self._txState:
-                _get_output(self._txen).on()
-            else:
-                _get_output(self._txen).off()
+            _get_output(self._txen).write(self._txState)
         # store IRQ status
         self._statusIrq = self.getIrqStatus()
         # call onTransmit function
@@ -1109,10 +1161,7 @@ class SX126x(BaseLoRa):
     def _interruptRx(self, channel=None):
         # set back txen pin to previous state
         if self._txen != -1:
-            if self._txState:
-                _get_output(self._txen).on()
-            else:
-                _get_output(self._txen).off()
+            _get_output(self._txen).write(self._txState)
         self._fixRxTimeout()
         # store IRQ status
         self._statusIrq = self.getIrqStatus()
@@ -1435,23 +1484,23 @@ class SX126x(BaseLoRa):
         # Adaptive CS control based on CS pin type
         if self._cs_define != 8:  # Manual CS pin (like Waveshare GPIO 21)
             # Simple CS control for manual pins
-            _get_output(self._cs_define).off()
+            _get_output(self._cs_define).write(False)
             buf = [opCode]
             for i in range(nBytes):
                 buf.append(data[i])
             spi.xfer2(buf)
-            _get_output(self._cs_define).on()
+            _get_output(self._cs_define).write(True)
         else:  # Kernel CS pin (like ClockworkPi GPIO 8)
             # Timing-based CS control for kernel CS pins
-            _get_output(self._cs_define).on()  # Initial high state
-            _get_output(self._cs_define).off()
+            _get_output(self._cs_define).write(True)  # Initial high state
+            _get_output(self._cs_define).write(False)
             time.sleep(0.000001)  # 1µs setup time for CS
             buf = [opCode]
             for i in range(nBytes):
                 buf.append(data[i])
             spi.xfer2(buf)
             time.sleep(0.000001)  # 1µs hold time before CS release
-            _get_output(self._cs_define).on()
+            _get_output(self._cs_define).write(True)
 
     def _readBytes(self, opCode: int, nBytes: int, address: tuple = (), nAddress: int = 0) -> tuple:
         if self.busyCheck():
@@ -1460,18 +1509,18 @@ class SX126x(BaseLoRa):
         # Adaptive CS control based on CS pin type
         if self._cs_define != 8:  # Manual CS pin (like Waveshare GPIO 21)
             # Simple CS control for manual pins
-            _get_output(self._cs_define).off()
+            _get_output(self._cs_define).write(False)
             buf = [opCode]
             for i in range(nAddress):
                 buf.append(address[i])
             for i in range(nBytes):
                 buf.append(0x00)
             feedback = spi.xfer2(buf)
-            _get_output(self._cs_define).on()
+            _get_output(self._cs_define).write(True)
         else:  # Kernel CS pin (like ClockworkPi GPIO 8)
             # Timing-based CS control for kernel CS pins
-            _get_output(self._cs_define).on()  # Initial high state
-            _get_output(self._cs_define).off()
+            _get_output(self._cs_define).write(True)  # Initial high state
+            _get_output(self._cs_define).write(False)
             time.sleep(0.000001)  # 1µs setup time for CS
             buf = [opCode]
             for i in range(nAddress):
@@ -1480,7 +1529,7 @@ class SX126x(BaseLoRa):
                 buf.append(0x00)
             feedback = spi.xfer2(buf)
             time.sleep(0.000001)  # 1µs hold time before CS release
-            _get_output(self._cs_define).on()
+            _get_output(self._cs_define).write(True)
 
         return tuple(feedback[nAddress + 1 :])
 

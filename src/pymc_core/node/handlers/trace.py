@@ -5,7 +5,7 @@ for network diagnostics and analysis.
 """
 
 import struct
-from typing import Any, Callable, Dict
+from typing import Any, Callable, Dict, Optional
 
 from ...protocol import Packet
 from ...protocol.constants import PAYLOAD_TYPE_TRACE
@@ -39,8 +39,8 @@ class TraceHandler:
         """Clear callback for trace responses from a specific contact."""
         self._response_callbacks.pop(contact_hash, None)
 
-    async def __call__(self, pkt: Packet) -> None:
-        """Handle incoming trace packet."""
+    async def __call__(self, pkt: Packet) -> Optional[Dict[str, Any]]:
+        """Handle incoming trace packet and return parsed data."""
         try:
             self._log(f"[TraceHandler] Processing trace packet: {len(pkt.payload)} bytes")
 
@@ -97,8 +97,11 @@ class TraceHandler:
                             f"for 0x{contact_hash:02X}"
                         )
 
+            return parsed_data
+
         except Exception as e:
             self._log(f"[TraceHandler] Error processing trace packet: {e}")
+            return None
 
     def _parse_trace_payload(self, payload: bytes) -> Dict[str, Any]:
         """Parse trace packet payload.

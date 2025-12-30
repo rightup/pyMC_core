@@ -13,11 +13,13 @@ from .constants import (
     ADVERT_FLAG_IS_CHAT_NODE,
     CIPHER_BLOCK_SIZE,
     CONTACT_TYPE_ROOM_SERVER,
+    MAX_ADVERT_DATA_SIZE,
     MAX_PACKET_PAYLOAD,
     MAX_PATH_SIZE,
     PAYLOAD_TYPE_ACK,
     PAYLOAD_TYPE_ADVERT,
     PAYLOAD_TYPE_ANON_REQ,
+    PAYLOAD_TYPE_CONTROL,
     PAYLOAD_TYPE_GRP_DATA,
     PAYLOAD_TYPE_GRP_TXT,
     PAYLOAD_TYPE_PATH,
@@ -303,9 +305,13 @@ class PacketBuilder:
         pubkey = local_identity.get_public_key()
         ts_bytes = struct.pack("<I", timestamp)
         appdata = PacketBuilder._encode_advert_data(name, lat, lon, feature1, feature2, flags)
+        if len(appdata) > MAX_ADVERT_DATA_SIZE:
+            raise ValueError(
+                f"advert appdata too large: {len(appdata)} bytes (max {MAX_ADVERT_DATA_SIZE})"
+            )
 
-        # Sign the first part of the payload (pubkey + timestamp + first 32 bytes of appdata)
-        body_to_sign = pubkey + ts_bytes + appdata[:32]
+        # Sign the payload (pubkey + timestamp + appdata)
+        body_to_sign = pubkey + ts_bytes + appdata
         signature = local_identity.sign(body_to_sign)
 
         # Create payload: pubkey + timestamp + signature + appdata
@@ -383,12 +389,15 @@ class PacketBuilder:
         if ptype not in (PAYLOAD_TYPE_TXT_MSG, PAYLOAD_TYPE_REQ, PAYLOAD_TYPE_RESPONSE):
             raise ValueError("invalid payload type")
 
-        aes_key = CryptoUtils.sha256(secret)
+        aes_key = secret[:16]
         cipher = PacketBuilder._encrypt_payload(aes_key, secret, plaintext)
         payload = PacketBuilder._hash_bytes(dest.get_public_key(), local_identity) + cipher
 
         header = PacketBuilder._create_header(ptype, route_type)
-        return PacketBuilder._create_packet(header, payload)
+        pkt = PacketBuilder._create_packet(header, payload)
+        pkt.path_len = 0
+        pkt.path = bytearray()
+        return pkt
 
     @staticmethod
     def create_anon_req(
@@ -878,3 +887,124 @@ class PacketBuilder:
             protocol_code=REQ_TYPE_GET_TELEMETRY_DATA,
             data=bytes([inv]),  # Just the permission mask as additional data
         )
+
+    # ---------- Control/Discovery Packets ----------
+
+    @staticmethod
+    def create_discovery_request(
+        tag: int,
+        filter_mask: int,
+        since: int = 0,
+        prefix_only: bool = False,
+    ) -> Packet:
+        """Create a node discovery request packet.
+
+        Generates a control packet to discover nearby nodes on the mesh network.
+        This is a zero-hop broadcast packet that nearby nodes will respond to.
+
+        Args:
+            tag: Random identifier to match responses (uint32_t).
+            filter_mask: Bitmask of node types to discover; the bit at position `node_type` is set
+                to select that type (e.g., for ADV_TYPE_REPEATER=2, use (1 << 2) == 0x04).
+            since: Optional timestamp - only nodes modified after this respond (uint32_t).
+            prefix_only: Request 8-byte key prefix instead of full 32-byte key.
+
+        Returns:
+            Packet: Discovery request packet ready to send as zero-hop.
+
+        Example:
+            ```python
+            import random
+            tag = random.randint(0, 0xFFFFFFFF)
+            # Filter for repeaters: ADV_TYPE_REPEATER=2, so (1 << 2) = 0x04
+            packet = PacketBuilder.create_discovery_request(tag, filter_mask=0x04)
+            # Send as zero-hop broadcast
+            ```
+        """
+        # Build payload: type+flags(1) + filter(1) + tag(4) + since(4, optional)
+        payload = bytearray()
+
+        # First byte: CTL_TYPE_NODE_DISCOVER_REQ (0x80) + flags
+        flags = 0x01 if prefix_only else 0x00
+        payload.append(0x80 | flags)
+
+        # Filter byte
+        payload.append(filter_mask & 0xFF)
+
+        # Tag (4 bytes, little-endian)
+        payload.extend(struct.pack("<I", tag))
+
+        # Optional since timestamp (4 bytes, little-endian)
+        if since > 0:
+            payload.extend(struct.pack("<I", since))
+
+        # Create packet with direct routing (will be sent as zero-hop)
+        pkt = Packet()
+        pkt.header = PacketBuilder._create_header(PAYLOAD_TYPE_CONTROL, route_type="direct")
+        pkt.path_len = 0
+        pkt.path = bytearray()
+        pkt.payload = payload
+        pkt.payload_len = len(payload)
+        return pkt
+
+    @staticmethod
+    def create_discovery_response(
+        tag: int,
+        node_type: int,
+        inbound_snr: float,
+        pub_key: bytes,
+        prefix_only: bool = False,
+    ) -> Packet:
+        """Create a node discovery response packet.
+
+        Generates a control packet in response to a discovery request.
+        This is sent as a zero-hop packet to the requester.
+
+        Args:
+            tag: Tag from the discovery request to match.
+            node_type: Type of this node (0-15, e.g., 1 for repeater).
+            inbound_snr: SNR of the received request (will be multiplied by 4).
+            pub_key: Node's public key (32 bytes).
+            prefix_only: Send only 8-byte key prefix instead of full key.
+
+        Returns:
+            Packet: Discovery response packet ready to send as zero-hop.
+
+        Example:
+            ```python
+            identity = LocalIdentity()
+            packet = PacketBuilder.create_discovery_response(
+                tag=0x12345678,
+                node_type=1,  # Repeater
+                inbound_snr=8.5,
+                pub_key=identity.get_public_key()
+            )
+            ```
+        """
+        # Build payload: type+node_type(1) + snr(1) + tag(4) + pub_key(8 or 32)
+        payload = bytearray()
+
+        # First byte: CTL_TYPE_NODE_DISCOVER_RESP (0x90) + node_type (lower 4 bits)
+        payload.append(0x90 | (node_type & 0x0F))
+
+        # SNR byte (multiply by 4, clamp to signed int8_t range, and encode as unsigned byte)
+        snr_byte = max(-128, min(127, int(inbound_snr * 4)))
+        payload.append(snr_byte & 0xFF)
+
+        # Tag (4 bytes, little-endian)
+        payload.extend(struct.pack("<I", tag))
+
+        # Public key (8 or 32 bytes)
+        if prefix_only:
+            payload.extend(pub_key[:8])
+        else:
+            payload.extend(pub_key[:32])
+
+        # Create packet with direct routing (will be sent as zero-hop)
+        pkt = Packet()
+        pkt.header = PacketBuilder._create_header(PAYLOAD_TYPE_CONTROL, route_type="direct")
+        pkt.path_len = 0
+        pkt.path = bytearray()
+        pkt.payload = payload
+        pkt.payload_len = len(payload)
+        return pkt

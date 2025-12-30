@@ -18,6 +18,7 @@ from .handlers import (
     AckHandler,
     AdvertHandler,
     AnonReqResponseHandler,
+    ControlHandler,
     GroupTextHandler,
     LoginResponseHandler,
     PathHandler,
@@ -81,6 +82,9 @@ class Dispatcher:
         self._current_expected_crc: Optional[int] = None
         self._recent_acks: dict[int, float] = {}  # {crc: timestamp}
         self._waiting_acks = {}
+
+        # Simple TX lock to prevent concurrent transmissions
+        self._tx_lock = asyncio.Lock()
 
         # Use provided packet filter or create default
         if packet_filter is not None:
@@ -155,7 +159,7 @@ class Dispatcher:
         # Register all the standard handlers
         self.register_handler(
             AdvertHandler.payload_type(),
-            AdvertHandler(contacts, self._log, local_identity, event_service),
+            AdvertHandler(self._log),
         )
         self.register_handler(AckHandler.payload_type(), ack_handler)
 
@@ -203,7 +207,9 @@ class Dispatcher:
         self.telemetry_response_handler = protocol_response_handler
 
         # PATH handler - for route discovery packets, with ACK and protocol response processing
-        path_handler = PathHandler(self._log, ack_handler, protocol_response_handler)
+        path_handler = PathHandler(
+            self._log, ack_handler, protocol_response_handler, login_response_handler
+        )
         self.register_handler(PathHandler.payload_type(), path_handler)
 
         # Login response handler for PAYLOAD_TYPE_RESPONSE packets
@@ -226,6 +232,15 @@ class Dispatcher:
         )
         # Keep a reference for the node
         self.trace_handler = trace_handler
+
+        # CONTROL handler for node discovery
+        control_handler = ControlHandler(self._log)
+        self.register_handler(
+            ControlHandler.payload_type(),
+            control_handler,
+        )
+        # Keep a reference for the node
+        self.control_handler = control_handler
 
         self._logger.info("Default handlers registered.")
 
@@ -284,8 +299,6 @@ class Dispatcher:
 
     def _on_packet_received(self, data: bytes) -> None:
         """Called by the radio when a packet comes in."""
-        self._log(f"[RX DEBUG] Packet received: {len(data)} bytes")
-
         # Schedule the packet processing in the event loop
         try:
             loop = asyncio.get_running_loop()
@@ -378,6 +391,7 @@ class Dispatcher:
     ) -> bool:
         """
         Send a packet and optionally wait for an ACK.
+        Uses a lock to serialize transmissions instead of dropping packets.
 
         Args:
             packet: The packet to send
@@ -385,22 +399,26 @@ class Dispatcher:
             expected_crc: The expected CRC for ACK matching.
                 If None, will be calculated from packet.
         """
+        async with self._tx_lock:  # Wait our turn
+            return await self._send_packet_immediate(packet, wait_for_ack, expected_crc)
+
+    async def _send_packet_immediate(
+        self,
+        packet: Packet,
+        wait_for_ack: bool = True,
+        expected_crc: Optional[int] = None,
+    ) -> bool:
+        """Send a packet immediately (assumes lock is held)."""
         payload_type = packet.header >> PH_TYPE_SHIFT
 
         # ------------------------------------------------------------------ #
-        #  Make sure we're not already busy
-        # ------------------------------------------------------------------ #
-        if self.state != DispatcherState.IDLE:
-            self._log("Busy, skipping TX.")
-            return False
-
-        # ------------------------------------------------------------------ #
-        #  Send the packet
+        #  Send the packet (lock ensures only one transmission at a time)
         # ------------------------------------------------------------------ #
         self.state = DispatcherState.TRANSMIT
         raw = packet.write_to()
+        tx_metadata = None
         try:
-            await self.radio.send(raw)
+            tx_metadata = await self.radio.send(raw)
         except Exception as e:
             self._log(f"Radio transmit error: {e}")
             self.state = DispatcherState.IDLE
@@ -409,6 +427,10 @@ class Dispatcher:
         type_name = PAYLOAD_TYPES.get(payload_type, f"UNKNOWN_{payload_type}")
         route_name = ROUTE_TYPES.get(packet.get_route_type(), f"UNKNOWN_{packet.get_route_type()}")
         self._log(f"TX {packet.get_raw_length()} bytes (type={type_name}, route={route_name})")
+
+        # Store metadata on packet for access by handlers
+        if tx_metadata:
+            packet._tx_metadata = tx_metadata
 
         if self.packet_sent_callback:
             await self._invoke_callback(self.packet_sent_callback, packet)
@@ -516,6 +538,7 @@ class Dispatcher:
 
     async def run_forever(self) -> None:
         """Run the dispatcher maintenance loop indefinitely (call this in an asyncio task)."""
+        health_check_counter = 0
         while True:
             # Clean out old ACK CRCs (older than 5 seconds)
             now = asyncio.get_event_loop().time()
@@ -523,6 +546,13 @@ class Dispatcher:
 
             # Clean old packet hashes for deduplication
             self.packet_filter.cleanup_old_hashes()
+
+            # Simple health check every 60 seconds
+            health_check_counter += 1
+            if health_check_counter >= 60:
+                health_check_counter = 0
+                if hasattr(self.radio, "check_radio_health"):
+                    self.radio.check_radio_health()
 
             # With callback-based RX, just do maintenance tasks
             await asyncio.sleep(1.0)  # Check every second for cleanup
@@ -576,7 +606,9 @@ class Dispatcher:
 
     def get_filter_stats(self) -> dict:
         """Get current packet filter statistics."""
-        return self.packet_filter.get_stats()
+        stats = self.packet_filter.get_stats()
+        stats["tx_lock_locked"] = self._tx_lock.locked()
+        return stats
 
     def clear_packet_filter(self) -> None:
         """Clear packet filter data."""
@@ -597,3 +629,7 @@ class Dispatcher:
             except Exception:
                 continue
         return None
+
+    def cleanup(self):
+        """Clean up resources when shutting down."""
+        self._log("Dispatcher cleanup completed")
