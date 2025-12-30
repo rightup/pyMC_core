@@ -9,21 +9,34 @@ import logging
 import sys
 import threading
 import time
-from typing import Any, Callable, Dict, Optional
+from typing import Callable, Dict, Optional
 
 try:
     from periphery import GPIO, EdgeEvent
+
+    PERIPHERY_AVAILABLE = True
 except ImportError:
-    print("\nError: python-periphery library is required for GPIO management.")
-    print("━" * 60)
-    print("This application requires GPIO hardware access which is only")
-    print("available on Linux-based systems (Raspberry Pi, Orange Pi, etc.)")
-    print("\nReason: python-periphery uses Linux kernel interfaces that")
-    print("        don't exist on macOS or Windows.")
-    print("\nSolutions:")
-    print("   • Run this application on a Linux SBC")
-    print("━" * 60)
-    sys.exit(1)
+    # Mock GPIO classes for testing/non-hardware environments
+    PERIPHERY_AVAILABLE = False
+    GPIO = None
+    EdgeEvent = None
+
+    class GPIOImportError(ImportError):
+        """Raised when GPIO functionality is used without python-periphery"""
+
+        def __init__(self):
+            super().__init__(
+                "\n\nError: python-periphery library is required for GPIO management.\n"
+                "━" * 60 + "\n"
+                "This application requires GPIO hardware access which is only\n"
+                "available on Linux-based systems (Raspberry Pi, Orange Pi, etc.)\n\n"
+                "Reason: python-periphery uses Linux kernel interfaces that\n"
+                "        don't exist on macOS or Windows.\n\n"
+                "Solutions:\n"
+                "   • Run this application on a Linux SBC\n"
+                "━" * 60
+            )
+
 
 logger = logging.getLogger("GPIOPinManager")
 
@@ -38,7 +51,13 @@ class GPIOPinManager:
         Args:
             gpio_chip: Path to GPIO chip device (default: /dev/gpiochip0)
                       Set to "auto" to auto-detect first available chip
+
+        Raises:
+            GPIOImportError: If python-periphery is not available
         """
+        if not PERIPHERY_AVAILABLE:
+            raise GPIOImportError()
+
         self._gpio_chip = self._resolve_gpio_chip(gpio_chip)
         self._pins: Dict[int, GPIO] = {}
         self._led_threads: Dict[int, threading.Thread] = {}  # Track active LED threads
@@ -283,7 +302,7 @@ class GPIOPinManager:
                     if gpio.poll(30.0) and not stop_event.is_set():
                         # Consume event from kernel queue to prevent repeated triggers
                         event: EdgeEvent = gpio.read_event()
-                        
+
                         # Only process rising edges (kernel filters, but verify)
                         if event.edge == "rising":
                             callback = self._input_callbacks.get(pin_number)

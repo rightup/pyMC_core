@@ -177,13 +177,8 @@ class TestTextMessageHandler:
 # Advert Handler Tests
 class TestAdvertHandler:
     def setup_method(self):
-        self.contacts = MockContactBook()
         self.log_fn = MagicMock()
-        self.local_identity = LocalIdentity()
-        self.event_service = MockEventService()
-        self.handler = AdvertHandler(
-            self.contacts, self.log_fn, self.local_identity, self.event_service
-        )
+        self.handler = AdvertHandler(self.log_fn)
 
     def test_payload_type(self):
         """Test advert handler payload type."""
@@ -191,21 +186,19 @@ class TestAdvertHandler:
 
     def test_advert_handler_initialization(self):
         """Test advert handler initialization."""
-        assert self.handler.contacts == self.contacts
         assert self.handler.log == self.log_fn
-        assert self.handler.identity == self.local_identity
-        assert self.handler.event_service == self.event_service
 
     @pytest.mark.asyncio
     async def test_advert_handler_accepts_valid_signature(self):
         remote_identity = LocalIdentity()
         packet = PacketBuilder.create_advert(remote_identity, "RemoteNode")
 
-        await self.handler(packet)
+        result = await self.handler(packet)
 
-        assert len(self.contacts.added_contacts) == 1
-        added_contact = self.contacts.added_contacts[0]
-        assert added_contact["public_key"] == remote_identity.get_public_key().hex()
+        assert result is not None
+        assert result["valid"] is True
+        assert result["public_key"] == remote_identity.get_public_key().hex()
+        assert result["name"] == "RemoteNode"
 
     @pytest.mark.asyncio
     async def test_advert_handler_rejects_invalid_signature(self):
@@ -216,9 +209,9 @@ class TestAdvertHandler:
             appdata_offset = packet.payload_len - 1
         packet.payload[appdata_offset] ^= 0x01
 
-        await self.handler(packet)
+        result = await self.handler(packet)
 
-        assert len(self.contacts.added_contacts) == 0
+        assert result is None
         assert any(
             "invalid signature" in call.args[0].lower()
             for call in self.log_fn.call_args_list
@@ -227,16 +220,15 @@ class TestAdvertHandler:
 
     @pytest.mark.asyncio
     async def test_advert_handler_ignores_self_advert(self):
-        packet = PacketBuilder.create_advert(self.local_identity, "SelfNode")
+        """Test that handler processes self-advert (dispatcher handles filtering)."""
+        local_identity = LocalIdentity()
+        packet = PacketBuilder.create_advert(local_identity, "SelfNode")
 
-        await self.handler(packet)
+        result = await self.handler(packet)
 
-        assert len(self.contacts.added_contacts) == 0
-        assert any(
-            "self advert" in call.args[0].lower()
-            for call in self.log_fn.call_args_list
-            if call.args
-        )
+        # Handler should still return parsed data; dispatcher filters self-adverts
+        assert result is not None
+        assert result["name"] == "SelfNode"
 
 
 # Path Handler Tests
@@ -385,7 +377,7 @@ async def test_handlers_can_be_called():
     handlers = [
         AckHandler(log_fn),
         TextMessageHandler(local_identity, contacts, log_fn, send_packet_fn, event_service),
-        AdvertHandler(contacts, log_fn, local_identity, event_service),
+        AdvertHandler(log_fn),
         PathHandler(log_fn),
         GroupTextHandler(local_identity, contacts, log_fn, send_packet_fn),
         LoginResponseHandler(local_identity, contacts, log_fn),
