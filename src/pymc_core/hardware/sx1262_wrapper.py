@@ -518,8 +518,10 @@ class SX1262Radio(LoRaRadio):
             self.lora._reset = self.reset_pin
             self.lora._busy = self.busy_pin
             self.lora._irq = self.irq_pin_number
-            self.lora._txen = self.txen_pin
-            self.lora._rxen = self.rxen_pin
+            # Pass -1 for TXEN/RXEN to prevent SX126x driver from controlling them
+            # The wrapper handles these pins correctly via _control_tx_rx_pins()
+            self.lora._txen = -1  # Managed by wrapper, not low-level driver
+            self.lora._rxen = -1  # Managed by wrapper, not low-level driver
             self.lora._wake = -1  # Not used
 
             # Setup TXEN pin if needed
