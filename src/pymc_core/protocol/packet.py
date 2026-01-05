@@ -2,6 +2,7 @@ from typing import ByteString, Optional
 
 from .constants import (
     MAX_PATH_SIZE,
+    MAX_SUPPORTED_PAYLOAD_VERSION,
     PH_ROUTE_MASK,
     PH_TYPE_MASK,
     PH_TYPE_SHIFT,
@@ -318,6 +319,11 @@ class Packet:
         idx, data_len = 0, len(data)
         self.header = data[idx]
         idx += 1
+
+        # Validate packet version (must match C++ supported versions)
+        version = self.get_payload_version()
+        if version > MAX_SUPPORTED_PAYLOAD_VERSION:
+            raise ValueError(f"Unsupported packet version: {version}")
 
         # Read transport codes if present
         if self.has_transport_codes():
