@@ -321,7 +321,7 @@ class Packet:
         idx += 1
 
         # Validate packet version (must match C++ supported versions)
-        version = self.get_payload_version()
+        version = self.get_payload_ver()
         if version > MAX_SUPPORTED_PAYLOAD_VERSION:
             raise ValueError(f"Unsupported packet version: {version}")
 
