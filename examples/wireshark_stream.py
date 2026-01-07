@@ -5,7 +5,7 @@ import socket
 import struct
 import time
 
-from common import create_mesh_node
+from common import create_mesh_node, get_supported_radios
 
 LINKTYPE_USER0 = 147
 

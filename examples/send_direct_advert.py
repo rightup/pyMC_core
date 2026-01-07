@@ -10,7 +10,7 @@ The direct advert is sent without expecting any acknowledgment or response.
 
 import asyncio
 
-from common import create_mesh_node, print_packet_info
+from common import create_mesh_node, get_supported_radios, print_packet_info
 
 from pymc_core.protocol.constants import ADVERT_FLAG_IS_CHAT_NODE
 from pymc_core.protocol.packet_builder import PacketBuilder
@@ -51,7 +51,7 @@ def main():
     parser = argparse.ArgumentParser(description="Send a direct advertisement packet")
     parser.add_argument(
         "--radio-type",
-        choices=["waveshare", "uconsole", "meshadv-mini", "kiss-tnc"],
+        choices=get_supported_radios(),
         default="waveshare",
         help="Radio hardware type (default: waveshare)",
     )

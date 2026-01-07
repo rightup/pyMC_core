@@ -21,7 +21,7 @@ import asyncio
 import time
 from typing import Dict, Optional
 
-from common import create_mesh_node
+from common import create_mesh_node, get_supported_radios
 
 from pymc_core.node.handlers.login_server import LoginServerHandler
 from pymc_core.protocol import Identity, LocalIdentity
@@ -381,7 +381,7 @@ def main():
     )
     parser.add_argument(
         "--radio-type",
-        choices=["waveshare", "uconsole", "meshadv-mini", "kiss-tnc"],
+        choices=get_supported_radios(),
         default="waveshare",
         help="Radio hardware type (default: waveshare)",
     )

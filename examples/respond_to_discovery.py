@@ -10,7 +10,7 @@ Simply run this script and it will respond to any discovery requests until stopp
 
 import asyncio
 
-from common import create_mesh_node
+from common import create_mesh_node, get_supported_radios
 
 from pymc_core.protocol.packet_builder import PacketBuilder
 
@@ -121,7 +121,7 @@ def main():
     parser = argparse.ArgumentParser(description="Respond to mesh node discovery requests")
     parser.add_argument(
         "--radio-type",
-        choices=["waveshare", "uconsole", "meshadv-mini", "kiss-tnc"],
+        choices=get_supported_radios(),
         default="waveshare",
         help="Radio hardware type (default: waveshare)",
     )
