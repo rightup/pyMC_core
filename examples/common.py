@@ -70,7 +70,7 @@ RADIOS = {
         "rxen_pin": 12,
         "use_dio3_tcxo": True,
         "frequency": int(910.525 * 1000000),  # US: 910.525 MHz
-        "tx_power": 22,
+        "tx_power": 12,  # real meshadv power is 10dB higher, see https://github.com/chrismyers2000/MeshAdv-Pi-Hat/issues/18
         "spreading_factor": 7,
         "bandwidth": int(62.5 * 1000),
         "coding_rate": 5,
@@ -94,8 +94,10 @@ RADIOS = {
     },
 }
 
+
 def get_supported_radios():
     return list(RADIOS.keys()) + ["kiss-tnc"]
+
 
 def create_radio(radio_type: str = "waveshare", serial_port: str = "/dev/ttyUSB0") -> LoRaRadio:
     """Create a radio instance with configuration for specified hardware.
@@ -143,9 +145,7 @@ def create_radio(radio_type: str = "waveshare", serial_port: str = "/dev/ttyUSB0
         logger.debug("Imported SX1262Radio successfully")
 
         if radio_type not in RADIOS:
-            raise ValueError(
-                f"Unknown radio type: {radio_type}. Use f{get_supported_radios()}"
-            )
+            raise ValueError(f"Unknown radio type: {radio_type}. Use f{get_supported_radios()}")
 
         radio_kwargs = configs[radio_type]
         logger.debug(f"Radio configuration for {radio_type}: {radio_kwargs}")

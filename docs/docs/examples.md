@@ -153,7 +153,7 @@ pyMC_Core supports both direct SX1262 radio control and KISS TNC devices:
 - **Hardware**: FrequencyLabs meshadv Hat
 - **Platform**: Raspberry Pi (or compatible single-board computer)
 - **Frequency**: 868MHz (EU) or 915MHz (US)
-- **TX Power**: Up to 22dBm
+- **TX Power**: Up to 27dBm (Note: Actual tx power is [10dB higher than configured value](https://github.com/chrismyers2000/MeshAdv-Pi-Hat/issues/18))
 - **SPI Bus**: SPI0
 - **GPIO Pins**: CS=21, Reset=18, Busy=20, IRQ=16
 
@@ -342,7 +342,7 @@ All examples use the SX1262 LoRa radio with the following default settings:
 #### meshadv (Frequency Labs)
 - **Radio Type**: SX1262 direct hardware control
 - **Frequency**: 869.525MHz (European standard)
-- **TX Power**: 22dBm
+- **TX Power**: 22dBm (Note: Actual tx power is [10dB higher than configured value](https://github.com/chrismyers2000/MeshAdv-Pi-Hat/issues/18))
 - **Spreading Factor**: 11
 - **Bandwidth**: 250kHz
 - **Coding Rate**: 4/5
