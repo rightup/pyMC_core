@@ -156,6 +156,20 @@ class LocalIdentity(Identity):
         """
         return self._x25519_public
 
+    def get_signing_key_bytes(self) -> bytes:
+        """
+        Get the signing key bytes for this identity.
+        
+        For standard keys, returns the 32-byte Ed25519 seed.
+        For firmware keys, returns the 64-byte expanded key format [scalar||nonce].
+        
+        Returns:
+            The signing key bytes (32 or 64 bytes depending on key type).
+        """
+        if self._firmware_key:
+            return self._firmware_key
+        return self.signing_key.encode()
+
     def sign(self, message: bytes) -> bytes:
         """
         Sign a message with the Ed25519 private key.
