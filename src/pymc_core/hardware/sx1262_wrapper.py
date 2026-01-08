@@ -537,6 +537,11 @@ class SX1262Radio(LoRaRadio):
                 else:
                     logger.warning(f"Could not setup RXEN pin {self.rxen_pin}")
 
+            # Ensure TX/RX pins are in default state (RX mode)
+            if self.txen_pin != -1 or self.rxen_pin != -1:
+                self._control_tx_rx_pins(tx_mode=False)
+                logger.debug("TX/RX control pins set to RX mode")
+
             # Setup LED pins if specified
             if self.txled_pin != -1 and not self._txled_pin_setup:
                 if self._gpio_manager.setup_output_pin(self.txled_pin, initial_value=False):
