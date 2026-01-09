@@ -368,7 +368,11 @@ class SX1262Radio(LoRaRadio):
                         try:
                             # Use the IRQ status stored by the interrupt handler
                             irqStat = self._last_irq_status
-                            if irqStat & self.lora.IRQ_RX_DONE:
+                            
+                            # Check CRC error FIRST - if CRC failed, don't read FIFO
+                            if irqStat & self.lora.IRQ_CRC_ERR:
+                                logger.warning("[RX] CRC error detected - discarding packet")
+                            elif irqStat & self.lora.IRQ_RX_DONE:
                                 (
                                     payloadLengthRx,
                                     rxStartBufferPointer,
@@ -410,8 +414,6 @@ class SX1262Radio(LoRaRadio):
                                         logger.warning("[RX] No RX callback registered!")
                                 else:
                                     logger.warning("[RX] Empty packet received")
-                            elif irqStat & self.lora.IRQ_CRC_ERR:
-                                logger.warning("[RX] CRC error detected")
                             elif irqStat & self.lora.IRQ_TIMEOUT:
                                 logger.warning("[RX] RX timeout detected")
                             elif irqStat & self.lora.IRQ_HEADER_ERR:
@@ -1009,15 +1011,8 @@ class SX1262Radio(LoRaRadio):
         logger.debug("[TX->RX] Starting RX mode restoration after transmission")
         try:
             if self.lora:
-                self.lora.clearIrqStatus(0xFFFF)
                 self.lora.setStandby(self.lora.STANDBY_RC)
-                await asyncio.sleep(0.05)
-
                 self.lora.request(self.lora.RX_CONTINUOUS)
-
-                await asyncio.sleep(0.05)
-                self.lora.clearIrqStatus(0xFFFF)
-
                 logger.debug("[TX->RX] RX mode restoration completed")
 
         except Exception as e:
