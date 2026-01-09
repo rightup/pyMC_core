@@ -48,6 +48,7 @@ class SX1262Radio(LoRaRadio):
         is_waveshare: bool = False,
         use_dio3_tcxo: bool = False,
         dio3_tcxo_voltage: float = 1.8,
+        use_dio2_rf: bool = False,
     ):
         """
         Initialize SX1262 radio
@@ -73,6 +74,7 @@ class SX1262Radio(LoRaRadio):
             is_waveshare: Use alternate initialization needed for Waveshare HAT
             use_dio3_tcxo: Enable DIO3 TCXO control (default: False)
             dio3_tcxo_voltage: TCXO reference voltage in volts (default: 1.8)
+            use_dio2_rf: Enable DIO2 as RF switch control (default: False)
         """
         # Check if there's already an active instance and clean it up
         if SX1262Radio._active_instance is not None:
@@ -105,6 +107,7 @@ class SX1262Radio(LoRaRadio):
         self.is_waveshare = is_waveshare
         self.use_dio3_tcxo = use_dio3_tcxo
         self.dio3_tcxo_voltage = dio3_tcxo_voltage
+        self.use_dio2_rf = use_dio2_rf
 
         # State variables
         self.lora: Optional[SX126x] = None
@@ -636,7 +639,9 @@ class SX1262Radio(LoRaRadio):
 
                 self.lora.setRegulatorMode(self.lora.REGULATOR_DC_DC)
                 self.lora.calibrate(0x7F)
-                self.lora.setDio2RfSwitch(False)
+                self.lora.setDio2RfSwitch(self.use_dio2_rf)
+                if self.use_dio2_rf:
+                    logger.info("DIO2 RF switch control enabled")
 
                 # Set packet type and frequency
                 rfFreq = int(self.frequency * 33554432 / 32000000)
