@@ -170,10 +170,10 @@ class PacketBuilder:
 
         # Add name if present
         if final_flags & ADVERT_FLAG_HAS_NAME:
-            name_bytes = name.encode("utf-8")[:31] + b"\x00"
-            buf += name_bytes
-        else:
-            buf += bytes(32)
+            name_bytes = name.encode("utf-8")
+            # Copy name bytes up to remaining space in MAX_ADVERT_DATA_SIZE
+            remaining = MAX_ADVERT_DATA_SIZE - len(buf)
+            buf += name_bytes[:remaining]
 
         return bytes(buf)
 

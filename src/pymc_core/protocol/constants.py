@@ -38,7 +38,9 @@ PAYLOAD_TYPE_RAW_CUSTOM = 0x0F
 # ---------------------------------------------------------------------------
 # Payload version values (2 bits)
 # ---------------------------------------------------------------------------
-PAYLOAD_VER_1 = 0x00
+PAYLOAD_VER_1 = 0x00  # Currently supported
+PAYLOAD_VER_2 = 0x01  # Reserved for future use
+MAX_SUPPORTED_PAYLOAD_VERSION = PAYLOAD_VER_2  # Accept versions 0-1
 
 # ---------------------------------------------------------------------------
 # Misc sizes

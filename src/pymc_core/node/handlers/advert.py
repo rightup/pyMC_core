@@ -1,5 +1,5 @@
 import time
-from typing import Optional, Dict, Any
+from typing import Any, Dict, Optional
 
 from ...protocol import Identity, Packet, decode_appdata
 from ...protocol.constants import (
@@ -40,7 +40,8 @@ class AdvertHandler(BaseHandler):
 
         if len(appdata) > MAX_ADVERT_DATA_SIZE:
             self.log(
-                f"Advert appdata too large ({len(appdata)} bytes); truncating to {MAX_ADVERT_DATA_SIZE}"
+                f"Advert appdata too large ({len(appdata)} bytes). "
+                f"Truncating to {MAX_ADVERT_DATA_SIZE}"
             )
             appdata = appdata[:MAX_ADVERT_DATA_SIZE]
 
@@ -51,25 +52,33 @@ class AdvertHandler(BaseHandler):
     ) -> bool:
         """Verify the cryptographic signature of the advert packet."""
         try:
-
             if len(pubkey) != PUB_KEY_SIZE:
-                self.log(f"Invalid public key length: {len(pubkey)} bytes (expected {PUB_KEY_SIZE})")
+                self.log(
+                    f"Invalid public key length: {len(pubkey)} bytes (expected {PUB_KEY_SIZE})"
+                )
                 return False
-            
+
             if len(signature) != SIGNATURE_SIZE:
-                self.log(f"Invalid signature length: {len(signature)} bytes (expected {SIGNATURE_SIZE})")
+                self.log(
+                    f"Invalid signature length: {len(signature)} bytes (expected {SIGNATURE_SIZE})"
+                )
                 return False
-            
+
             peer_identity = Identity(pubkey)
         except ValueError as exc:
-            self.log(f"Unable to construct peer identity - invalid key format: {exc}")
+            self.log(f"Malformed public key in advert - invalid key format: {exc}")
             return False
         except Exception as exc:
-            self.log(f"Unable to construct peer identity: {type(exc).__name__}: {exc}")
+            exc_type = type(exc).__name__
+            self.log(
+                f"Cryptographic error constructing identity from public key: " f"{exc_type}: {exc}"
+            )
             return False
 
         signed_region = pubkey + timestamp + appdata
         if not peer_identity.verify(signed_region, signature):
+            pubkey_prefix = pubkey[:8].hex()
+            self.log(f"Signature verification failed for advert " f"(pubkey={pubkey_prefix}...)")
             return False
         return True
 
@@ -85,7 +94,9 @@ class AdvertHandler(BaseHandler):
             pubkey_hex = pubkey_bytes.hex()
 
             # Verify cryptographic signature
-            if not self._verify_advert_signature(pubkey_bytes, timestamp_bytes, appdata, signature_bytes):
+            if not self._verify_advert_signature(
+                pubkey_bytes, timestamp_bytes, appdata, signature_bytes
+            ):
                 self.log(f"Rejecting advert with invalid signature (pubkey={pubkey_hex[:8]}...)")
                 return None
 
@@ -119,8 +130,8 @@ class AdvertHandler(BaseHandler):
                 "contact_type_id": contact_type_id,
                 "contact_type": contact_type,
                 "timestamp": int(time.time()),
-                "snr": packet._snr if hasattr(packet, '_snr') else 0.0,
-                "rssi": packet._rssi if hasattr(packet, '_rssi') else 0,
+                "snr": packet._snr if hasattr(packet, "_snr") else 0.0,
+                "rssi": packet._rssi if hasattr(packet, "_rssi") else 0,
                 "valid": True,
             }
 

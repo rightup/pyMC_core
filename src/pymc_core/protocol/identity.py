@@ -93,14 +93,33 @@ class LocalIdentity(Identity):
         generates a new random key pair.
 
         Args:
-            seed: Optional 32-byte seed for deterministic key generation.
+            seed: Optional 32 or 64-byte seed. 32-byte for standard PyNaCl key generation,
+                  64-byte for MeshCore firmware expanded key format [scalar||nonce].
         """
-        self.signing_key = SigningKey(seed) if seed else SigningKey.generate()
-        self.verify_key = self.signing_key.verify_key
+        # Detect MeshCore 64-byte expanded key format
+        if seed and len(seed) == 64:
+            from nacl.bindings import crypto_scalarmult_ed25519_base_noclamp
 
-        # Build 64-byte Ed25519 secret key: seed + pub
-        ed25519_pub = self.verify_key.encode()
-        ed25519_sk = self.signing_key.encode() + ed25519_pub
+            # MeshCore format: [32-byte clamped scalar][32-byte nonce]
+            self._firmware_key = seed
+            self.signing_key = None
+
+            # Derive public key from scalar
+            scalar = seed[:32]
+            ed25519_pub = crypto_scalarmult_ed25519_base_noclamp(scalar)
+            self.verify_key = VerifyKey(ed25519_pub)
+
+            # Build ed25519_sk for X25519 conversion (use reconstructed format)
+            ed25519_sk = scalar + ed25519_pub
+        else:
+            # Standard 32-byte seed or None
+            self._firmware_key = None
+            self.signing_key = SigningKey(seed) if seed else SigningKey.generate()
+            self.verify_key = self.signing_key.verify_key
+
+            # Build 64-byte Ed25519 secret key: seed + pub
+            ed25519_pub = self.verify_key.encode()
+            ed25519_sk = self.signing_key.encode() + ed25519_pub
 
         # X25519 keypair for ECDH
         self._x25519_private = CryptoUtils.ed25519_sk_to_x25519(ed25519_sk)
@@ -137,6 +156,20 @@ class LocalIdentity(Identity):
         """
         return self._x25519_public
 
+    def get_signing_key_bytes(self) -> bytes:
+        """
+        Get the signing key bytes for this identity.
+        
+        For standard keys, returns the 32-byte Ed25519 seed.
+        For firmware keys, returns the 64-byte expanded key format [scalar||nonce].
+        
+        Returns:
+            The signing key bytes (32 or 64 bytes depending on key type).
+        """
+        if self._firmware_key:
+            return self._firmware_key
+        return self.signing_key.encode()
+
     def sign(self, message: bytes) -> bytes:
         """
         Sign a message with the Ed25519 private key.
@@ -147,4 +180,37 @@ class LocalIdentity(Identity):
         Returns:
             The 64-byte Ed25519 signature.
         """
+        if self._firmware_key:
+            # Use MeshCore/orlp ed25519 signing algorithm
+            import hashlib
+
+            from nacl.bindings import (
+                crypto_core_ed25519_scalar_add,
+                crypto_core_ed25519_scalar_mul,
+                crypto_core_ed25519_scalar_reduce,
+                crypto_scalarmult_ed25519_base_noclamp,
+            )
+
+            scalar = self._firmware_key[:32]
+            nonce_prefix = self._firmware_key[32:64]
+            public_key = self.get_public_key()
+
+            # r = H(nonce_prefix || message)
+            r_hash = hashlib.sha512(nonce_prefix + message).digest()
+            r = crypto_core_ed25519_scalar_reduce(r_hash)
+
+            # R = r * G
+            R_point = crypto_scalarmult_ed25519_base_noclamp(r)
+
+            # h = H(R || pubkey || message)
+            h_hash = hashlib.sha512(R_point + public_key + message).digest()
+            h = crypto_core_ed25519_scalar_reduce(h_hash)
+
+            # s = (h * scalar + r) mod L
+            h_times_scalar = crypto_core_ed25519_scalar_mul(h, scalar)
+            s = crypto_core_ed25519_scalar_add(h_times_scalar, r)
+
+            # Signature is R || s
+            return R_point + s
+
         return self.signing_key.sign(message).signature
