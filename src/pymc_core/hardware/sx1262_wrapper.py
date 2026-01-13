@@ -49,6 +49,7 @@ class SX1262Radio(LoRaRadio):
         use_dio3_tcxo: bool = False,
         dio3_tcxo_voltage: float = 1.8,
         use_dio2_rf: bool = False,
+        cps_pin: int = -1,
     ):
         """
         Initialize SX1262 radio
@@ -95,6 +96,7 @@ class SX1262Radio(LoRaRadio):
         self.rxen_pin = rxen_pin
         self.txled_pin = txled_pin
         self.rxled_pin = rxled_pin
+        self.cps_pin = cps_pin
 
         # Radio configuration
         self.frequency = frequency
@@ -213,6 +215,11 @@ class SX1262Radio(LoRaRadio):
 
     def _basic_radio_setup(self, use_busy_check: bool = False) -> bool:
         """Common radio setup: reset, standby, and LoRa packet type"""
+        # Set CPS pin low before reset if configured
+        if self.cps_pin != -1:
+            self._gpio_manager.set_pin_low(self.cps_pin)
+            time.sleep(0.01)  # Give hardware time to respond
+        
         self.lora.reset()
         time.sleep(0.01)  # Give hardware time to complete reset
         self.lora.setStandby(self.lora.STANDBY_RC)
@@ -548,6 +555,13 @@ class SX1262Radio(LoRaRadio):
             if self.txen_pin != -1 or self.rxen_pin != -1:
                 self._control_tx_rx_pins(tx_mode=False)
                 logger.debug("TX/RX control pins set to RX mode")
+
+            # Setup CPS pin if specified
+            if self.cps_pin != -1:
+                if self._gpio_manager.setup_output_pin(self.cps_pin, initial_value=False):
+                    logger.debug(f"CPS pin {self.cps_pin} configured")
+                else:
+                    logger.warning(f"Could not setup CPS pin {self.cps_pin}")
 
             # Setup LED pins if specified
             if self.txled_pin != -1 and not self._txled_pin_setup:
