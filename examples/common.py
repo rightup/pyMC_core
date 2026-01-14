@@ -24,6 +24,80 @@ from pymc_core import LocalIdentity
 from pymc_core.hardware.base import LoRaRadio
 from pymc_core.node.node import MeshNode
 
+# Radio configurations for different hardware
+RADIOS = {
+    "waveshare": {
+        "bus_id": 0,
+        "cs_id": 0,
+        "cs_pin": 21,  # Waveshare HAT CS pin
+        "reset_pin": 18,
+        "busy_pin": 20,
+        "irq_pin": 16,
+        "txen_pin": 13,  # GPIO 13 for TX enable
+        "rxen_pin": 12,
+        "frequency": int(869.618 * 1000000),  # EU: 869.618 MHz
+        "tx_power": 22,
+        "spreading_factor": 8,
+        "bandwidth": int(62.5 * 1000),
+        "coding_rate": 8,
+        "preamble_length": 17,
+        "is_waveshare": True,
+    },
+    "uconsole": {
+        "bus_id": 1,  # SPI1
+        "cs_id": 0,
+        "cs_pin": -1,  # Use hardware CS
+        "reset_pin": 25,
+        "busy_pin": 24,
+        "irq_pin": 26,
+        "txen_pin": -1,
+        "rxen_pin": -1,
+        "frequency": int(869.525 * 1000000),  # EU: 869.525 MHz
+        "tx_power": 22,
+        "spreading_factor": 11,
+        "bandwidth": int(250 * 1000),
+        "coding_rate": 5,
+        "preamble_length": 17,
+    },
+    "meshadv": {
+        "bus_id": 0,
+        "cs_id": 0,
+        "cs_pin": 21,
+        "reset_pin": 18,
+        "busy_pin": 20,
+        "irq_pin": 16,
+        "txen_pin": 13,
+        "rxen_pin": 12,
+        "use_dio3_tcxo": True,
+        "frequency": int(910.525 * 1000000),  # US: 910.525 MHz
+        "tx_power": 12,  # real meshadv power is 10dB higher, see https://github.com/chrismyers2000/MeshAdv-Pi-Hat/issues/18
+        "spreading_factor": 7,
+        "bandwidth": int(62.5 * 1000),
+        "coding_rate": 5,
+        "preamble_length": 17,
+    },
+    "meshadv-mini": {
+        "bus_id": 0,
+        "cs_id": 0,
+        "cs_pin": 8,
+        "reset_pin": 24,
+        "busy_pin": 20,
+        "irq_pin": 16,
+        "txen_pin": -1,
+        "rxen_pin": 12,
+        "frequency": int(910.525 * 1000000),  # US: 910.525 MHz
+        "tx_power": 22,
+        "spreading_factor": 7,
+        "bandwidth": int(62.5 * 1000),
+        "coding_rate": 5,
+        "preamble_length": 17,
+    },
+}
+
+
+def get_supported_radios():
+    return list(RADIOS.keys()) + ["kiss-tnc"]
+
 
 def create_radio(radio_type: str = "waveshare", serial_port: str = "/dev/ttyUSB0") -> LoRaRadio:
     """Create a radio instance with configuration for specified hardware.
@@ -70,63 +144,8 @@ def create_radio(radio_type: str = "waveshare", serial_port: str = "/dev/ttyUSB0
 
         logger.debug("Imported SX1262Radio successfully")
 
-        # Radio configurations for different hardware
-        configs = {
-            "waveshare": {
-                "bus_id": 0,
-                "cs_id": 0,
-                "cs_pin": 21,  # Waveshare HAT CS pin
-                "reset_pin": 18,
-                "busy_pin": 20,
-                "irq_pin": 16,
-                "txen_pin": 13,  # GPIO 13 for TX enable
-                "rxen_pin": 12,
-                "frequency": int(869.618 * 1000000),  # EU: 869.618 MHz
-                "tx_power": 22,
-                "spreading_factor": 8,
-                "bandwidth": int(62.5 * 1000),
-                "coding_rate": 8,
-                "preamble_length": 17,
-                "is_waveshare": True,
-            },
-            "uconsole": {
-                "bus_id": 1,  # SPI1
-                "cs_id": 0,
-                "cs_pin": -1,  # Use hardware CS
-                "reset_pin": 25,
-                "busy_pin": 24,
-                "irq_pin": 26,
-                "txen_pin": -1,
-                "rxen_pin": -1,
-                "frequency": int(869.525 * 1000000),  # EU: 869.525 MHz
-                "tx_power": 22,
-                "spreading_factor": 11,
-                "bandwidth": int(250 * 1000),
-                "coding_rate": 5,
-                "preamble_length": 17,
-            },
-            "meshadv-mini": {
-                "bus_id": 0,
-                "cs_id": 0,
-                "cs_pin": 8,
-                "reset_pin": 24,
-                "busy_pin": 20,
-                "irq_pin": 16,
-                "txen_pin": -1,
-                "rxen_pin": 12,
-                "frequency": int(910.525 * 1000000),  # US: 910.525 MHz
-                "tx_power": 22,
-                "spreading_factor": 7,
-                "bandwidth": int(62.5 * 1000),
-                "coding_rate": 5,
-                "preamble_length": 17,
-            },
-        }
-
-        if radio_type not in configs:
-            raise ValueError(
-                f"Unknown radio type: {radio_type}. Use 'waveshare', 'meshadv-mini', 'uconsole', or 'kiss-tnc'"
-            )
+        if radio_type not in RADIOS:
+            raise ValueError(f"Unknown radio type: {radio_type}. Use f{get_supported_radios()}")
 
         radio_kwargs = configs[radio_type]
         logger.debug(f"Radio configuration for {radio_type}: {radio_kwargs}")
@@ -153,7 +172,7 @@ def create_mesh_node(
 
     Args:
         node_name: Name for the mesh node
-        radio_type: Type of radio hardware ("waveshare", "uconsole", "meshadv-mini", or "kiss-tnc")
+        radio_type: Type of radio hardware ("waveshare", "uconsole", "meshadv", "meshadv-mini", or "kiss-tnc")
         serial_port: Serial port for KISS TNC (only used with "kiss-tnc" type)
 
     Returns:

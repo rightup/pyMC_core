@@ -149,7 +149,7 @@ The meshadv and meshadv-mini are available from FrequencyLabs, and are open sour
 2. Ensure SPI interface is enabled in Raspberry Pi configuration
 3. Install required GPIO library: `sudo apt install python3-rpi.lgpio`
 
-**Pin Configuration (Raspberry Pi):**
+** meshadv-mini Pin Configuration (Raspberry Pi):**
 - SPI Bus: SPI0 (MOSI, MISO, SCLK pins)
 - CS: GPIO 21
 - Reset: GPIO 18
@@ -204,22 +204,22 @@ radio.begin()
 
 ### Radio Configuration Parameters
 
-| Parameter          | Description                      | Waveshare HAT  | meshadv-mini        | uConsole       |
-|--------------------|----------------------------------|----------------|----------------|----------------|
-| `bus_id`           | SPI bus ID                       | 0              | 0              | 1              |
-| `cs_id`            | SPI chip select ID               | 0              | 0              | 0              |
-| `cs_pin`           | Chip select GPIO pin             | 21             | 8              | -1             |
-| `reset_pin`        | Reset GPIO pin                   | 18             | 24             | 25             |
-| `busy_pin`         | Busy GPIO pin                    | 20             | 20             | 24             |
-| `irq_pin`          | Interrupt GPIO pin               | 16             | 16             | 26             |
-| `txen_pin`         | TX enable GPIO pin               | 6              | -1             | -1             |
-| `rxen_pin`         | RX enable GPIO pin               | -1             | 12             | -1             |
-| `frequency`        | Operating frequency in Hz        | 869525000 (EU) | 910525000 (US) | 869525000 (EU) |
-| `tx_power`         | Transmit power in dBm            | 22             | 22             | 22             |
-| `spreading_factor` | LoRa spreading factor (7-12)     | 11             | 7              | 11             |
-| `bandwidth`        | Bandwidth in Hz                  | 250000         | 62500          | 250000         |
-| `coding_rate`      | Coding rate (5=4/5, 6=4/6, etc.) | 5              | 5              | 5              |
-| `preamble_length`  | Preamble length                  | 17             | 17             | 17             |
+| Parameter          | Description                      | Waveshare HAT  | meshadv        | meshadv-mini   | uConsole       |
+|--------------------|----------------------------------|----------------|----------------|----------------|----------------|
+| `bus_id`           | SPI bus ID                       | 0              | 0              | 0              | 1              |
+| `cs_id`            | SPI chip select ID               | 0              | 0              | 0              | 0              |
+| `cs_pin`           | Chip select GPIO pin             | 21             | 21             | 8              | -1             |
+| `reset_pin`        | Reset GPIO pin                   | 18             | 18             | 24             | 25             |
+| `busy_pin`         | Busy GPIO pin                    | 20             | 20             | 20             | 24             |
+| `irq_pin`          | Interrupt GPIO pin               | 16             | 16             | 16             | 26             |
+| `txen_pin`         | TX enable GPIO pin               | 6              | 13             | -1             | -1             |
+| `rxen_pin`         | RX enable GPIO pin               | -1             | 12             | 12             | -1             |
+| `frequency`        | Operating frequency in Hz        | 869525000 (EU) | 910525000 (US) | 910525000 (US) | 869525000 (EU) |
+| `tx_power`         | Transmit power in dBm            | 22             | 22             | 22             | 22             |
+| `spreading_factor` | LoRa spreading factor (7-12)     | 11             | 7              | 7              | 11             |
+| `bandwidth`        | Bandwidth in Hz                  | 250000         | 62500          | 62500          | 250000         |
+| `coding_rate`      | Coding rate (5=4/5, 6=4/6, etc.) | 5              | 5              | 5              | 5              |
+| `preamble_length`  | Preamble length                  | 17             | 17             | 17             | 17             |
 
 **Note:** Adjust the `frequency` parameter based on your regional LoRa regulations (868MHz for EU, 915MHz for US, 433MHz for Asia).
 

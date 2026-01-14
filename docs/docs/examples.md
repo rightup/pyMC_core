@@ -23,7 +23,8 @@ All examples support multiple radio types via `--radio-type` argument:
 ### SX1262 Direct Radio
 - **waveshare**: Waveshare SX1262 HAT for Raspberry Pi
 - **uconsole**: ClockworkPi uConsole LoRa module
-- **meshadv-mini**: MeshAdviser Mini board
+- **meshav**: MeshAdviser Raspberry Pi HAT
+- **meshadv-mini**: MeshAdviser Mini Raspberry Pi HAT
 
 ### KISS TNC
 - **kiss-tnc**: Serial KISS TNC devices (MeshTNC)
@@ -34,7 +35,7 @@ All examples support multiple radio types via `--radio-type` argument:
 Creates radio instances for different hardware types:
 - **SX1262 Radios**: Direct hardware control via SPI/GPIO
 - **KISS TNC**: Serial protocol wrapper for TNC devices
-- Supports waveshare, uconsole, meshadv-mini, and kiss-tnc types
+- Supports waveshare, uconsole, meshadv, meshadv-mini, and kiss-tnc types
 
 ### `create_mesh_node(name, radio_type, serial_port)`
 Helper function that creates a mesh node setup:
@@ -85,7 +86,7 @@ python examples/send_tracked_advert.py --help
 ```
 
 **Arguments:**
-- `--radio-type`: Choose hardware type (waveshare, uconsole, meshadv-mini, kiss-tnc)
+- `--radio-type`: Choose hardware type (waveshare, uconsole, meshadv, meshadv-mini, kiss-tnc)
 - `--serial-port`: Serial port for KISS TNC (default: /dev/ttyUSB0)
 
 ### SX1262 Direct Radio Examples
@@ -148,6 +149,14 @@ pyMC_Core supports both direct SX1262 radio control and KISS TNC devices:
 - **GPIO Pins**: CS=-1, Reset=25, Busy=24, IRQ=26
 - **Additional Setup**: Requires SPI1 overlay and GPS/RTC configuration (see uConsole setup guide)
 
+#### Frequency Labs meshadv
+- **Hardware**: FrequencyLabs meshadv Hat
+- **Platform**: Raspberry Pi (or compatible single-board computer)
+- **Frequency**: 868MHz (EU) or 915MHz (US)
+- **TX Power**: Up to 27dBm (Note: Actual tx power is [10dB higher than configured value](https://github.com/chrismyers2000/MeshAdv-Pi-Hat/issues/18))
+- **SPI Bus**: SPI0
+- **GPIO Pins**: CS=21, Reset=18, Busy=20, IRQ=16
+
 #### Frequency Labs meshadv-mini
 - **Hardware**: FrequencyLabs meshadv-mini Hat
 - **Platform**: Raspberry Pi (or compatible single-board computer)
@@ -177,6 +186,16 @@ pyMC_Core supports both direct SX1262 radio control and KISS TNC devices:
 - IRQ Pin: GPIO 26
 - TX Enable: Not used (-1)
 - RX Enable: Not used (-1)
+
+#### meshadv (Frequency Labs)
+- SPI Bus: 0
+- CS ID: 0
+- CS Pin: GPIO 21
+- Busy Pin: GPIO 20
+- Reset Pin: GPIO 18
+- IRQ Pin: GPIO 16
+- TX Enable: GPIO 13
+- RX Enable: GPIO 12
 
 #### meshadv-mini (Frequency Labs)
 - SPI Bus: 0
@@ -319,6 +338,22 @@ All examples use the SX1262 LoRa radio with the following default settings:
 - **IRQ Pin**: GPIO 26
 - **TX Enable**: Not used (-1)
 - **RX Enable**: Not used (-1)
+
+#### meshadv (Frequency Labs)
+- **Radio Type**: SX1262 direct hardware control
+- **Frequency**: 869.525MHz (European standard)
+- **TX Power**: 22dBm (Note: Actual tx power is [10dB higher than configured value](https://github.com/chrismyers2000/MeshAdv-Pi-Hat/issues/18))
+- **Spreading Factor**: 11
+- **Bandwidth**: 250kHz
+- **Coding Rate**: 4/5
+- **Preamble Length**: 17 symbols
+- **SPI Bus**: 0
+- **CS Pin**: GPIO 21
+- **Reset Pin**: GPIO 18
+- **Busy Pin**: GPIO 20
+- **IRQ Pin**: GPIO 16
+- **TX Enable**: GPIO 13
+- **RX Enable**: GPIO 12
 
 #### meshadv-mini (Frequency Labs)
 - **Radio Type**: SX1262 direct hardware control
