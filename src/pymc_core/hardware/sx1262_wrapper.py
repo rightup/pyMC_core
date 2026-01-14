@@ -57,7 +57,7 @@ class SX1262Radio(LoRaRadio):
         Args:
             bus_id: SPI bus ID (default: 0)
             cs_id: SPI chip select ID (default: 0)
-            cs_pin: Manual CS GPIO pin (-1 = use hardware CS, e.g. 21 for Waveshare HAT)
+            cs_pin: Manual CS GPIO pin (-1 = use hardware CS via spidev, e.g. 21 for Waveshare HAT)
             reset_pin: GPIO pin for reset (default: 18)
             busy_pin: GPIO pin for busy signal (default: 20)
             irq_pin: GPIO pin for interrupt (default: 16)
@@ -219,7 +219,7 @@ class SX1262Radio(LoRaRadio):
         if self.cps_pin != -1:
             self._gpio_manager.set_pin_low(self.cps_pin)
             time.sleep(0.01)  # Give hardware time to respond
-        
+
         self.lora.reset()
         time.sleep(0.01)  # Give hardware time to complete reset
         self.lora.setStandby(self.lora.STANDBY_RC)
@@ -375,7 +375,7 @@ class SX1262Radio(LoRaRadio):
                         try:
                             # Use the IRQ status stored by the interrupt handler
                             irqStat = self._last_irq_status
-                            
+
                             # Check CRC error FIRST - if CRC failed, don't read FIFO
                             if irqStat & self.lora.IRQ_CRC_ERR:
                                 logger.warning("[RX] CRC error detected - discarding packet")

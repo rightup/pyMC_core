@@ -1,10 +1,13 @@
 import time
+
 import spidev
 
 from ...signal_utils import snr_register_to_db
 from .base import BaseLoRa
+
 spi = spidev.SpiDev()
 _gpio_manager = None
+
 
 def set_gpio_manager(gpio_manager):
     """Set the GPIO manager instance to be used by this module"""
@@ -308,6 +311,7 @@ class SX126x(BaseLoRa):
     _reset = 22
     _busy = 23
     _cs_define = 21
+    _use_hardware_cs = False  # Flag to indicate if using spidev's automatic CS
     _irq = -1
     _txen = -1
     _rxen = -1
@@ -402,7 +406,7 @@ class SX126x(BaseLoRa):
 
         reset_pin.write(False)  # periphery: write(False) = LOW
         time.sleep(0.001)
-        reset_pin.write(True)   # periphery: write(True) = HIGH
+        reset_pin.write(True)  # periphery: write(True) = HIGH
         return not self.busyCheck()
 
     def sleep(self, option=SLEEP_WARM_START):
@@ -449,36 +453,23 @@ class SX126x(BaseLoRa):
         self._cs = cs
         self._spiSpeed = speed
 
-        # Map CS IDs to actual GPIO pins based on Raspberry Pi SPI pinout
-        if bus == 0:  # SPI0
-            if cs == 0:
-                self._cs_define = 8  # CE0 = GPIO 8
-            elif cs == 1:
-                self._cs_define = 7  # CE1 = GPIO 7
-            else:
-                self._cs_define = 8  # Default to GPIO 8
-        elif bus == 1:  # SPI1
-            if cs == 0:
-                # OVERRIDE: GPIO 18 is busy on ClockworkPi/Heltec boards
-                # Use GPIO 17 instead (confirmed available)
-                self._cs_define = 17  # Override: GPIO 17 instead of standard GPIO 18
-            elif cs == 1:
-                self._cs_define = 17  # CE1 = GPIO 17
-            else:
-                self._cs_define = 17  # Default to GPIO 17 (safe alternative)
-        else:
-            # Keep original hardcoded value for unknown buses
-            self._cs_define = 21
+        # By default, use hardware CS (no manual GPIO control)
+        self._use_hardware_cs = True
+        self._cs_define = -1  # No GPIO pin for hardware CS
 
         # open spi line and set bus id, chip select, and spi speed
         spi.open(bus, cs)
         spi.max_speed_hz = speed
         spi.lsbfirst = False
         spi.mode = 0
+        spi.no_cs = False  # Enable hardware CS control by kernel
 
     def setManualCsPin(self, cs_pin: int):
         """Override CS pin for special boards like Waveshare HAT"""
+        self._use_hardware_cs = False
         self._cs_define = cs_pin
+        # Disable hardware CS since we're controlling it manually
+        spi.no_cs = True
 
     def setPins(
         self,
@@ -498,7 +489,9 @@ class SX126x(BaseLoRa):
         # periphery pins are initialized on first use by _get_output/_get_input
         _get_output(reset)
         _get_input(busy)
-        _get_output(self._cs_define)
+        # Only setup CS pin if using manual CS control
+        if not self._use_hardware_cs and self._cs_define != -1:
+            _get_output(self._cs_define)
         # IRQ pin managed externally by sx1262_wrapper.py via gpio_manager
         # Do NOT initialize it here to avoid double allocation
         if txen != -1:
@@ -1481,54 +1474,36 @@ class SX126x(BaseLoRa):
         if self.busyCheck():
             return
 
-        # Adaptive CS control based on CS pin type
-        if self._cs_define != 8:  # Manual CS pin (like Waveshare GPIO 21)
-            # Simple CS control for manual pins
-            _get_output(self._cs_define).write(False)
-            buf = [opCode]
-            for i in range(nBytes):
-                buf.append(data[i])
+        buf = [opCode]
+        for i in range(nBytes):
+            buf.append(data[i])
+
+        if self._use_hardware_cs:
+            # Use hardware CS - spidev handles CS automatically
             spi.xfer2(buf)
-            _get_output(self._cs_define).write(True)
-        else:  # Kernel CS pin (like ClockworkPi GPIO 8)
-            # Timing-based CS control for kernel CS pins
-            _get_output(self._cs_define).write(True)  # Initial high state
+        else:
+            # Manual CS control for special boards (e.g., Waveshare HAT)
             _get_output(self._cs_define).write(False)
-            time.sleep(0.000001)  # 1µs setup time for CS
-            buf = [opCode]
-            for i in range(nBytes):
-                buf.append(data[i])
             spi.xfer2(buf)
-            time.sleep(0.000001)  # 1µs hold time before CS release
             _get_output(self._cs_define).write(True)
 
     def _readBytes(self, opCode: int, nBytes: int, address: tuple = (), nAddress: int = 0) -> tuple:
         if self.busyCheck():
             return ()
 
-        # Adaptive CS control based on CS pin type
-        if self._cs_define != 8:  # Manual CS pin (like Waveshare GPIO 21)
-            # Simple CS control for manual pins
-            _get_output(self._cs_define).write(False)
-            buf = [opCode]
-            for i in range(nAddress):
-                buf.append(address[i])
-            for i in range(nBytes):
-                buf.append(0x00)
+        buf = [opCode]
+        for i in range(nAddress):
+            buf.append(address[i])
+        for i in range(nBytes):
+            buf.append(0x00)
+
+        if self._use_hardware_cs:
+            # Use hardware CS - spidev handles CS automatically
             feedback = spi.xfer2(buf)
-            _get_output(self._cs_define).write(True)
-        else:  # Kernel CS pin (like ClockworkPi GPIO 8)
-            # Timing-based CS control for kernel CS pins
-            _get_output(self._cs_define).write(True)  # Initial high state
+        else:
+            # Manual CS control for special boards (e.g., Waveshare HAT)
             _get_output(self._cs_define).write(False)
-            time.sleep(0.000001)  # 1µs setup time for CS
-            buf = [opCode]
-            for i in range(nAddress):
-                buf.append(address[i])
-            for i in range(nBytes):
-                buf.append(0x00)
             feedback = spi.xfer2(buf)
-            time.sleep(0.000001)  # 1µs hold time before CS release
             _get_output(self._cs_define).write(True)
 
         return tuple(feedback[nAddress + 1 :])
