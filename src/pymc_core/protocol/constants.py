@@ -54,7 +54,6 @@ CIPHER_BLOCK_SIZE = 16
 MAX_PACKET_PAYLOAD = 184  # firmware's default
 
 MAX_PATH_SIZE = 64
-MAX_PACKET_PAYLOAD = 256
 MAX_HASH_SIZE = 32  # SHA-256 truncated
 
 NAME_MAX_LEN = 16  # Max length of a contact name
