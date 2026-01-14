@@ -462,14 +462,17 @@ class SX126x(BaseLoRa):
         spi.max_speed_hz = speed
         spi.lsbfirst = False
         spi.mode = 0
-        spi.no_cs = False  # Enable hardware CS control by kernel
+        # Note: spi.no_cs defaults to False (hardware CS enabled), which is what we want
 
     def setManualCsPin(self, cs_pin: int):
-        """Override CS pin for special boards like Waveshare HAT"""
+        """Override CS pin for special boards like Waveshare HAT
+
+        Note: Manual CS pins (e.g., GPIO 21 on Waveshare) are typically different
+        from hardware SPI CS pins (GPIO 8/7), so there's no conflict with spidev's
+        hardware CS control. We simply use GPIO to control a separate CS line.
+        """
         self._use_hardware_cs = False
         self._cs_define = cs_pin
-        # Disable hardware CS since we're controlling it manually
-        spi.no_cs = True
 
     def setPins(
         self,
