@@ -570,7 +570,7 @@ class SX1262Radio(LoRaRadio):
                 if not self._basic_radio_setup():
                     return False
 
-                self.lora._fixResistanceAntenna()
+                # self.lora._fixResistanceAntenna()
 
                 rfFreq = int(self.frequency * 33554432 / 32000000)
                 self.lora.setRfFrequency(rfFreq)
@@ -604,12 +604,12 @@ class SX1262Radio(LoRaRadio):
                 rx_mask = self._get_rx_irq_mask()
                 self.lora.clearIrqStatus(0xFFFF)
                 self.lora.setDioIrqParams(rx_mask, rx_mask, self.lora.IRQ_NONE, self.lora.IRQ_NONE)
-
+                self.lora.setRxGain(self.lora.RX_GAIN_BOOSTED)
             else:  # Use full initialization
                 # Reset RF module and set to standby
                 if not self._basic_radio_setup(use_busy_check=True):
                     return False
-                self.lora._fixResistanceAntenna()
+                # self.lora._fixResistanceAntenna()
                 # Configure TCXO, regulator, calibration and RF switch
                 if self.use_dio3_tcxo:
                     # Map voltage to DIO3 constants following Meshtastic pattern
@@ -654,10 +654,8 @@ class SX1262Radio(LoRaRadio):
                 rfFreq = int(self.frequency * 33554432 / 32000000)
                 self.lora.setRfFrequency(rfFreq)
 
-                # Set RX gain and TX power
-                self.lora.writeRegister(self.lora.REG_RX_GAIN, [self.lora.RX_GAIN_POWER_SAVING], 1)
-                # Use setTxPower for automatic PA configuration based on power level
-                # For E22 modules: 22 dBm from SX1262 → ~30 dBm (1W) via external YP2233W PA
+                self.lora.setBufferBaseAddress(0x00, 0x80)  # TX=0x00, RX=0x80
+
                 logger.info(f"Setting TX power to {self.tx_power} dBm during initialization")
                 self.lora.setTxPower(self.tx_power, self.lora.TX_POWER_SX1262)
 
