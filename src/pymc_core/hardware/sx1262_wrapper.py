@@ -214,9 +214,9 @@ class SX1262Radio(LoRaRadio):
     def _basic_radio_setup(self, use_busy_check: bool = False) -> bool:
         """Common radio setup: reset, standby, and LoRa packet type"""
         self.lora.reset()
-        time.sleep(0.01)  # Give hardware time to complete reset
+        time.sleep(self.RADIO_TIMING_DELAY)  # Give hardware time to complete reset
         self.lora.setStandby(self.lora.STANDBY_RC)
-        time.sleep(0.01)  # Give hardware time to enter standby mode
+        time.sleep(self.RADIO_TIMING_DELAY)  # Give hardware time to enter standby mode
 
         # Check if standby mode was set correctly (different methods for different boards)
         if use_busy_check:
@@ -517,7 +517,7 @@ class SX1262Radio(LoRaRadio):
             # SPI and GPIO Pins setting
             self.lora.setSpi(self.bus_id, self.cs_id)
             if self.cs_pin != -1:
-                # Override CS pin for special boards (e.g., Waveshare HAT)
+                # Override CS pin
                 self.lora.setManualCsPin(self.cs_pin)
 
             self.lora._reset = self.reset_pin
@@ -564,85 +564,43 @@ class SX1262Radio(LoRaRadio):
                 else:
                     logger.warning(f"Could not setup RX LED pin {self.rxled_pin}")
 
-            # Adaptive initialization based on board type
-            if self.is_waveshare:  # Waveshare HAT - use minimal initialization
-                # Basic radio setup
-                if not self._basic_radio_setup():
-                    return False
+            # Basic radio setup
+            if not self._basic_radio_setup(use_busy_check=True):
+                return False
 
-                # self.lora._fixResistanceAntenna()
+            # Configure TCXO, regulator, calibration and RF switch
+            if self.use_dio3_tcxo:
+                # Map voltage to DIO3 constants following Meshtastic pattern
+                voltage_map = {
+                    1.6: self.lora.DIO3_OUTPUT_1_6,
+                    1.7: self.lora.DIO3_OUTPUT_1_7,
+                    1.8: self.lora.DIO3_OUTPUT_1_8,
+                    2.2: self.lora.DIO3_OUTPUT_2_2,
+                    2.4: self.lora.DIO3_OUTPUT_2_4,
+                    2.7: self.lora.DIO3_OUTPUT_2_7,
+                    3.0: self.lora.DIO3_OUTPUT_3_0,
+                    3.3: self.lora.DIO3_OUTPUT_3_3,
+                }
 
-                rfFreq = int(self.frequency * 33554432 / 32000000)
-                self.lora.setRfFrequency(rfFreq)
-
-                self.lora.setBufferBaseAddress(0x00, 0x80)  # TX=0x00, RX=0x80
-
-                # Enable LDRO if symbol duration > 16ms (SF11/62.5kHz = 32.768ms)
-                symbol_duration_ms = (2**self.spreading_factor) / (self.bandwidth / 1000)
-                ldro = symbol_duration_ms > 16.0
-                logger.info(
-                    f"LDRO {'enabled' if ldro else 'disabled'} "
-                    f"(symbol duration: {symbol_duration_ms:.3f}ms)"
-                )
-                self.lora.setLoRaModulation(
-                    self.spreading_factor, self.bandwidth, self.coding_rate, ldro
-                )
-
-                self.lora.setLoRaPacket(
-                    self.lora.HEADER_EXPLICIT,
-                    self.preamble_length,
-                    64,  # Initial payload length
-                    True,  # CRC on
-                    False,  # IQ standard
-                )
-
-                # Use RadioLib-compatible PA configuration and optimized setTxPower
-                # This automatically configures PA based on requested power level
-                self.lora.setTxPower(self.tx_power, self.lora.TX_POWER_SX1262)
-
-                # Configure RX interrupts (critical for RX functionality!)
-                rx_mask = self._get_rx_irq_mask()
-                self.lora.clearIrqStatus(0xFFFF)
-                self.lora.setDioIrqParams(rx_mask, rx_mask, self.lora.IRQ_NONE, self.lora.IRQ_NONE)
-                self.lora.setRxGain(self.lora.RX_GAIN_BOOSTED)
-            else:  # Use full initialization
-                # Reset RF module and set to standby
-                if not self._basic_radio_setup(use_busy_check=True):
-                    return False
-                # self.lora._fixResistanceAntenna()
-                # Configure TCXO, regulator, calibration and RF switch
-                if self.use_dio3_tcxo:
-                    # Map voltage to DIO3 constants following Meshtastic pattern
-                    voltage_map = {
-                        1.6: self.lora.DIO3_OUTPUT_1_6,
-                        1.7: self.lora.DIO3_OUTPUT_1_7,
-                        1.8: self.lora.DIO3_OUTPUT_1_8,
-                        2.2: self.lora.DIO3_OUTPUT_2_2,
-                        2.4: self.lora.DIO3_OUTPUT_2_4,
-                        2.7: self.lora.DIO3_OUTPUT_2_7,
-                        3.0: self.lora.DIO3_OUTPUT_3_0,
-                        3.3: self.lora.DIO3_OUTPUT_3_3,
-                    }
-
-                    voltage_constant = voltage_map.get(self.dio3_tcxo_voltage)
-                    if voltage_constant is None:
-                        closest_voltage = min(
-                            voltage_map.keys(), key=lambda x: abs(x - self.dio3_tcxo_voltage)
-                        )
-                        voltage_constant = voltage_map[closest_voltage]
-                        logger.debug(
-                            f"DIO3 TCXO voltage {self.dio3_tcxo_voltage}V "
-                            f"mapped to closest {closest_voltage}V"
-                        )
-                    else:
-                        logger.debug(f"DIO3 TCXO voltage {self.dio3_tcxo_voltage}V mapped exactly")
-
-                    # Set TCXO with 5ms delay (standard value)
-                    self.lora.setDio3TcxoCtrl(voltage_constant, self.lora.TCXO_DELAY_5)
-                    logger.info(f"DIO3 TCXO enabled: {self.dio3_tcxo_voltage}V, 5ms delay")
-                    time.sleep(0.05)  # Allow TCXO to stabilize
+                voltage_constant = voltage_map.get(self.dio3_tcxo_voltage)
+                if voltage_constant is None:
+                    closest_voltage = min(
+                        voltage_map.keys(), key=lambda x: abs(x - self.dio3_tcxo_voltage)
+                    )
+                    voltage_constant = voltage_map[closest_voltage]
+                    logger.debug(
+                        f"DIO3 TCXO voltage {self.dio3_tcxo_voltage}V "
+                        f"mapped to closest {closest_voltage}V"
+                    )
                 else:
-                    logger.debug("DIO3 TCXO is not enabled")
+                    logger.debug(f"DIO3 TCXO voltage {self.dio3_tcxo_voltage}V mapped exactly")
+
+                # Set TCXO with 5ms delay (standard value)
+                self.lora.setDio3TcxoCtrl(voltage_constant, self.lora.TCXO_DELAY_5)
+                logger.info(f"DIO3 TCXO enabled: {self.dio3_tcxo_voltage}V, 5ms delay")
+                time.sleep(0.05)  # Allow TCXO to stabilize
+            else:
+                logger.debug("DIO3 TCXO is not enabled")
 
                 self.lora.setRegulatorMode(self.lora.REGULATOR_DC_DC)
                 self.lora.calibrate(0x7F)
@@ -650,40 +608,46 @@ class SX1262Radio(LoRaRadio):
                 if self.use_dio2_rf:
                     logger.info("DIO2 RF switch control enabled")
 
-                # Set packet type and frequency
-                rfFreq = int(self.frequency * 33554432 / 32000000)
-                self.lora.setRfFrequency(rfFreq)
+            # Common configuration for all board types
+            # self.lora._fixResistanceAntenna()
 
-                self.lora.setBufferBaseAddress(0x00, 0x80)  # TX=0x00, RX=0x80
+            # Set frequency
+            rfFreq = int(self.frequency * 33554432 / 32000000)
+            self.lora.setRfFrequency(rfFreq)
 
-                logger.info(f"Setting TX power to {self.tx_power} dBm during initialization")
-                self.lora.setTxPower(self.tx_power, self.lora.TX_POWER_SX1262)
+            # Set buffer base addresses
+            self.lora.setBufferBaseAddress(0x00, 0x80)  # TX=0x00, RX=0x80
 
-                # Configure modulation and packet parameters
-                # Enable LDRO if symbol duration > 16ms (SF11/62.5kHz = 32.768ms)
-                symbol_duration_ms = (2**self.spreading_factor) / (self.bandwidth / 1000)
-                ldro = symbol_duration_ms > 16.0
-                logger.info(
-                    f"LDRO {'enabled' if ldro else 'disabled'} "
-                    f"(symbol duration: {symbol_duration_ms:.3f}ms)"
-                )
-                self.lora.setLoRaModulation(
-                    self.spreading_factor, self.bandwidth, self.coding_rate, ldro
-                )
-                self.lora.setPacketParamsLoRa(
-                    self.preamble_length,
-                    self.lora.HEADER_EXPLICIT,
-                    64,  # Initial payload length
-                    self.lora.CRC_ON,
-                    self.lora.IQ_STANDARD,
-                )
+            # Set TX power
+            logger.info(f"Setting TX power to {self.tx_power} dBm during initialization")
+            self.lora.setTxPower(self.tx_power, self.lora.TX_POWER_SX1262)
 
-                # Configure RX interrupts
-                rx_mask = self._get_rx_irq_mask()
-                self.lora.clearIrqStatus(0xFFFF)
-                self.lora.setDioIrqParams(rx_mask, rx_mask, self.lora.IRQ_NONE, self.lora.IRQ_NONE)
-                # Configure RX gain for maximum sensitivity (boosted mode)
-                self.lora.setRxGain(self.lora.RX_GAIN_BOOSTED)
+            # Configure modulation parameters
+            # Enable LDRO if symbol duration > 16ms (SF11/62.5kHz = 32.768ms)
+            symbol_duration_ms = (2**self.spreading_factor) / (self.bandwidth / 1000)
+            ldro = symbol_duration_ms > 16.0
+            logger.info(
+                f"LDRO {'enabled' if ldro else 'disabled'} "
+                f"(symbol duration: {symbol_duration_ms:.3f}ms)"
+            )
+            self.lora.setLoRaModulation(
+                self.spreading_factor, self.bandwidth, self.coding_rate, ldro
+            )
+
+            # Configure packet parameters
+            self.lora.setPacketParamsLoRa(
+                self.preamble_length,
+                self.lora.HEADER_EXPLICIT,
+                64,  # Initial payload length
+                self.lora.CRC_ON,
+                self.lora.IQ_STANDARD,
+            )
+
+            # Configure RX interrupts and gain
+            rx_mask = self._get_rx_irq_mask()
+            self.lora.clearIrqStatus(0xFFFF)
+            self.lora.setDioIrqParams(rx_mask, rx_mask, self.lora.IRQ_NONE, self.lora.IRQ_NONE)
+            self.lora.setRxGain(self.lora.RX_GAIN_BOOSTED)
 
             # Program custom CAD thresholds to chip hardware if available
             if self._custom_cad_peak is not None and self._custom_cad_min is not None:
@@ -1014,20 +978,10 @@ class SX1262Radio(LoRaRadio):
         logger.debug("[TX->RX] Starting RX mode restoration after transmission")
         try:
             if self.lora:
-                # Clear any pending IRQ before mode change
-                self.lora.clearIrqStatus(0xFFFF)
-
                 self.lora.setStandby(self.lora.STANDBY_RC)
-
                 await asyncio.sleep(0.05)
-
                 self.lora.request(self.lora.RX_CONTINUOUS)
-
                 await asyncio.sleep(0.05)
-
-                # Clear IRQ status after settling
-                self.lora.clearIrqStatus(0xFFFF)
-
                 logger.debug("[TX->RX] RX mode restoration completed")
 
         except Exception as e:
@@ -1144,8 +1098,16 @@ class SX1262Radio(LoRaRadio):
                 if raw_rssi is not None:
                     current_rssi = -(float(raw_rssi) / 2)
 
-                    # This prevents packet RSSI from contaminating noise floor measurements
-                    if current_rssi < (self._noise_floor + self.SAMPLING_THRESHOLD):
+                    # For initial sampling (bootstrap), accept any reasonable RSSI value
+                    # After that, only accept values near current noise floor to avoid packet contamination
+                    if self._noise_floor == -99.0:
+                        # Bootstrap: accept any RSSI in valid range (-150 to -30 dBm)
+                        accept_sample = -150 < current_rssi < -30
+                    else:
+                        # Normal: only accept samples near current noise floor
+                        accept_sample = current_rssi < (self._noise_floor + self.SAMPLING_THRESHOLD)
+                    
+                    if accept_sample:
                         self._num_floor_samples += 1
                         self._floor_sample_sum += current_rssi
 
@@ -1319,7 +1281,7 @@ class SX1262Radio(LoRaRadio):
         try:
             # Put radio in standby mode before CAD configuration
             self.lora.setStandby(self.lora.STANDBY_RC)
-            await asyncio.sleep(0.01)  # Give hardware time to enter standby
+            await asyncio.sleep(self.RADIO_TIMING_DELAY)  # Give hardware time to enter standby
 
             # Clear any existing interrupt flags
             existing_irq = self.lora.getIrqStatus()
@@ -1340,7 +1302,7 @@ class SX1262Radio(LoRaRadio):
 
             self._cad_event.clear()
             self.lora.setCad()
-            await asyncio.sleep(0.01)  # Give hardware time to start CAD operation
+            await asyncio.sleep(self.RADIO_TIMING_DELAY)  # Give hardware time to start CAD operation
 
             logger.debug(
                 f"CAD operation started - checking channel with peak={det_peak}, min={det_min}"
