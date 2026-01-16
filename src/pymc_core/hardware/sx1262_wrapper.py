@@ -568,7 +568,7 @@ class SX1262Radio(LoRaRadio):
             if not self._basic_radio_setup(use_busy_check=True):
                 return False
 
-            # Configure TCXO, regulator, calibration and RF switch
+            # Configure TCXO if enabled
             if self.use_dio3_tcxo:
                 # Map voltage to DIO3 constants following Meshtastic pattern
                 voltage_map = {
@@ -602,11 +602,12 @@ class SX1262Radio(LoRaRadio):
             else:
                 logger.debug("DIO3 TCXO is not enabled")
 
-                self.lora.setRegulatorMode(self.lora.REGULATOR_DC_DC)
-                self.lora.calibrate(0x7F)
-                self.lora.setDio2RfSwitch(self.use_dio2_rf)
-                if self.use_dio2_rf:
-                    logger.info("DIO2 RF switch control enabled")
+            # Regulator, calibration and RF switch configuration (required for all boards)
+            self.lora.setRegulatorMode(self.lora.REGULATOR_DC_DC)
+            self.lora.calibrate(0x7F)
+            self.lora.setDio2RfSwitch(self.use_dio2_rf)
+            if self.use_dio2_rf:
+                logger.info("DIO2 RF switch control enabled")
 
             # Common configuration for all board types
             # self.lora._fixResistanceAntenna()
@@ -769,7 +770,6 @@ class SX1262Radio(LoRaRadio):
 
     def _prepare_packet_transmission(self, data_list: list, length: int) -> None:
         """Prepare radio for packet transmission"""
-        self.lora.setBufferBaseAddress(0x00, 0x80)
         self.lora.writeBuffer(0x00, data_list, length)
         headerType = self.lora.HEADER_EXPLICIT
         preambleLength = self.preamble_length
