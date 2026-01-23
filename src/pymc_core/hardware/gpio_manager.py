@@ -84,35 +84,27 @@ class GPIOPinManager:
                         self.direction = direction
                         self._consumer = "pymc_core"
 
-                        # Request line for input or output using libgpiod v2 LineRequest if available
                         requested = False
-                        # Attempt v2 API: gpiod.LineRequest
                         try:
                             LineRequest = getattr(gpiod, "LineRequest", None)
                             if LineRequest is not None:
                                 req = LineRequest()
-                                # set consumer if attribute exists
                                 if hasattr(req, "consumer"):
                                     req.consumer = self._consumer
-                                # set request type constant if present
                                 if hasattr(req, "request_type"):
-                                    # prefer named constants if provided
                                     req.request_type = (
                                         getattr(gpiod, "LINE_REQ_DIR_OUT", None)
                                         if direction == "out"
                                         else getattr(gpiod, "LINE_REQ_DIR_IN", None)
                                     )
-                                # issue request
                                 try:
                                     self._line.request(req)
                                     requested = True
                                 except Exception:
-                                    # some bindings expect different method signature
                                     pass
                         except Exception:
                             pass
 
-                        # Fallback: older style line.request(consumer=..., type=...)
                         if not requested:
                             try:
                                 req_type = (
@@ -121,14 +113,12 @@ class GPIOPinManager:
                                     else getattr(gpiod, "LINE_REQ_DIR_IN", None)
                                 )
                                 if req_type is None:
-                                    # fallback integer defaults
                                     req_type = 1 if direction == "out" else 0
-                                # try request with kwargs
                                 try:
                                     self._line.request(consumer=self._consumer, type=req_type)
                                     requested = True
                                 except Exception:
-                                    # try request with positional or older API
+                                    # try request with older API
                                     try:
                                         self._line.request(req_type)
                                         requested = True
@@ -139,15 +129,13 @@ class GPIOPinManager:
 
                         if not requested:
                             raise RuntimeError(
-                                "Unsupported gpiod Python API on this system. Please install a compatible python-libgpiod (v2.4) or adjust the wrapper."
+                                "Unsupported gpiod Python library on this system. Please install a compatible python-libgpiod (v2.4) or adjust the wrapper."
                             )
 
                     def write(self, value: bool):
-                        # set_value exists in both v1 and v2 bindings
                         self._line.set_value(1 if value else 0)
 
                     def read(self) -> bool:
-                        # get_value exists in both v1 and v2 bindings
                         return bool(self._line.get_value())
 
                     def close(self):
@@ -156,15 +144,14 @@ class GPIOPinManager:
                         except Exception:
                             pass
 
-                    # Provide no-op poll/read_event for compatibility
                     def poll(self, timeout):
                         return False
 
                     def read_event(self):
                         return None
 
-            # make the module-level GPIO name point to the wrapper so rest of code can instantiate
-            globals()["GPIO"] = GpiodGPIO
+                # make the module-level GPIO name point to the wrapper so rest of code can instantiate
+                globals()["GPIO"] = GpiodGPIO
 
         # If periphery is used, ensure it was already imported; otherwise above raised
 
