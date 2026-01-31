@@ -1,6 +1,6 @@
 """
 GPIO Pin Manager for Linux SBCs
-Manages GPIO pins abstraction using python-periphery
+Manages GPIO pins abstraction using python-periphery or gpiod
 Works on Raspberry Pi, Orange Pi, Luckfox, and other Linux SBCs
 """
 
@@ -14,7 +14,6 @@ from typing import Callable, Dict, Optional
 
 try:
     from periphery import GPIO, EdgeEvent
-
     PERIPHERY_AVAILABLE = True
 except ImportError:
     # Mock GPIO classes for testing/non-hardware environments
@@ -25,27 +24,27 @@ except ImportError:
 # Optional libgpiod support
 try:
     import gpiod
-
     GPIOD_AVAILABLE = True
 except Exception:
     GPIOD_AVAILABLE = False
     gpiod = None
 
-    class GPIOImportError(ImportError):
-        """Raised when GPIO functionality is used without python-periphery"""
 
-        def __init__(self):
-            super().__init__(
-                "\n\nError: python-periphery library is required for GPIO management.\n"
-                "━" * 60 + "\n"
-                "This application requires GPIO hardware access which is only\n"
-                "available on Linux-based systems (Raspberry Pi, Orange Pi, etc.)\n\n"
-                "Reason: python-periphery uses Linux kernel interfaces that\n"
-                "        don't exist on macOS or Windows.\n\n"
-                "Solutions:\n"
-                "   • Run this application on a Linux SBC\n"
-                "━" * 60
-            )
+class GPIOImportError(ImportError):
+    """Raised when GPIO functionality is used without python-periphery or gpiod"""
+
+    def __init__(self):
+        super().__init__(
+            "\n\nError: python-periphery or gpiod library is required for GPIO management.\n"
+            "━" * 60 + "\n"
+            "This application requires GPIO hardware access which is only\n"
+            "available on Linux-based systems (Raspberry Pi, Orange Pi, etc.)\n\n"
+            "Reason: python-periphery uses Linux kernel interfaces that\n"
+            "        don't exist on macOS or Windows.\n\n"
+            "Solutions:\n"
+            "   • Run this application on a Linux SBC\n"
+            "━" * 60
+        )
 
 
 logger = logging.getLogger("GPIOPinManager")
@@ -72,6 +71,7 @@ class GPIOPinManager:
             if PERIPHERY_AVAILABLE:
                 self._backend = "periphery"
             elif GPIOD_AVAILABLE:
+                self._backend = "gpiod"
                 class GpiodGPIO:
                     def __init__(self, chip_path, lineoffset, direction, bias=None, edge=None):
                         # chip_path is like '/dev/gpiochip0' — use it directly
@@ -152,9 +152,9 @@ class GPIOPinManager:
 
                 # make the module-level GPIO name point to the wrapper so rest of code can instantiate
                 globals()["GPIO"] = GpiodGPIO
-
-        # If periphery is used, ensure it was already imported; otherwise above raised
-
+            else:
+                raise GPIOImportError()
+        
         self._gpio_chip = self._resolve_gpio_chip(gpio_chip)
         self._pins: Dict[int, GPIO] = {}
         self._led_threads: Dict[int, threading.Thread] = {}  # Track active LED threads
@@ -163,7 +163,7 @@ class GPIOPinManager:
         self._edge_threads: Dict[int, threading.Thread] = {}  # Track edge detection threads
         self._edge_stop_events: Dict[int, threading.Event] = {}  # Stop events for edge threads
 
-        logger.debug(f"GPIO Manager initialized with chip: {self._gpio_chip}")
+        logger.debug(f"GPIO Manager initialized with chip: {self._gpio_chip} using backend: {self._backend}")
 
     def _resolve_gpio_chip(self, gpio_chip: str) -> str:
         """Resolve GPIO chip path, auto-detecting if needed"""
