@@ -41,8 +41,10 @@ from openhop_core.protocol.constants import (
     ROUTE_TYPE_TRANSPORT_FLOOD,
     SIGNATURE_SIZE,
     TIMESTAMP_SIZE,
+    TXT_TYPE_CLI_COMMAND,
     TXT_TYPE_CLI_DATA,
     TXT_TYPE_PLAIN,
+    TXT_TYPE_SIGNED_PLAIN,
 )
 from openhop_core.protocol.packet_utils import PathUtils
 from openhop_core.protocol.utils import decode_appdata
@@ -809,6 +811,281 @@ class TestTextMessageHandler:
         assert (first.payload[0] & 0x0F) == PAYLOAD_TYPE_ACK
         assert int.from_bytes(first.payload[1:5], "little") == ack_crc
         assert int.from_bytes(second.payload[:4], "little") == ack_crc
+
+    # ------------------------------------------------------------------
+    # Text types -- firmware BaseChatMesh::onPeerDataRecv
+    # ------------------------------------------------------------------
+
+    def _typed_dm(
+        self, txt_type: int, *, flood: bool, text: str = "ping", timestamp: int = 0x5EEDBEEF
+    ):
+        """A real encrypted DM addressed to us, carrying ``txt_type``.
+
+        Returns (packet, sender_identity); the sender is registered as a known
+        contact so the handler decrypts it.
+        """
+        sender = LocalIdentity()
+
+        class _Receiver:
+            public_key = self.local_identity.get_public_key().hex()
+            out_path: list = []
+            out_path_len = -1
+
+        packet, _ = PacketBuilder.create_text_message(
+            _Receiver(),
+            sender,
+            text,
+            attempt=0,
+            message_type="flood" if flood else "direct",
+            txt_type=txt_type,
+            timestamp=timestamp,
+        )
+        contact = MockContact(public_key=sender.get_public_key().hex(), name="peer")
+        self.contacts.contacts = [contact]
+        return packet, sender
+
+    @pytest.mark.asyncio
+    async def test_flood_cli_data_sends_nothing_back(self):
+        """A flood CLI_DATA earns no ACK and no reciprocal path.
+
+        Firmware used to answer one with a bare createPathReturn, but that call
+        left BaseChatMesh::onPeerDataRecv when the CLI_DATA branch became the
+        reply-only path (afb969cc): it now just hands the text to
+        onCommandDataRecv. CLI_DATA is also on the no-delivery-ACK list, so the
+        whole branch is silent on the air.
+        """
+        packet, _sender = self._typed_dm(TXT_TYPE_CLI_DATA, flood=True)
+
+        result = await self.handler(packet)
+        await self._wait_for_sends(1)
+
+        assert result.authenticated is True
+        assert self.send_packet_fn.call_count == 0
+        assert self.event_service.publish_sync.called
+
+    @pytest.mark.asyncio
+    async def test_flood_cli_command_is_delivered_and_sends_nothing_back(self):
+        """CLI_COMMAND reaches the app verbatim and, like CLI_DATA, is silent.
+
+        Firmware routes it to onCLICommandRecv, which runs the command only for
+        a sender flagged isRemoteCLIAllowed() and otherwise queues it for the
+        app. Core has no CLI to run, so the queue-for-the-app branch is all of
+        it -- and no ACK or path return either way.
+        """
+        packet, _sender = self._typed_dm(TXT_TYPE_CLI_COMMAND, flood=True, text="reboot")
+
+        result = await self.handler(packet)
+        await self._wait_for_sends(1)
+
+        assert result.authenticated is True
+        assert self.send_packet_fn.call_count == 0
+        self.event_service.publish_sync.assert_called_once()
+        _event, data = self.event_service.publish_sync.call_args.args
+        assert data["txt_type"] == TXT_TYPE_CLI_COMMAND
+        assert data["message_text"] == "reboot"
+
+    @pytest.mark.asyncio
+    async def test_cli_command_does_not_resolve_a_pending_command_waiter(self):
+        """Only a CLI_DATA *reply* completes a command we sent.
+
+        A CLI_COMMAND travels the other way -- it is someone asking us to run
+        something -- so letting it resolve the waiter would hand
+        send_repeater_command an inbound command as if it were the answer.
+        """
+        packet, sender = self._typed_dm(TXT_TYPE_CLI_COMMAND, flood=False, text="reboot")
+        replies = []
+        self.handler.register_command_response(
+            sender.get_public_key(), lambda text, contact: replies.append(text)
+        )
+
+        await self.handler(packet)
+
+        assert replies == []
+        assert self.event_service.publish_sync.called
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "txt_type",
+        [TXT_TYPE_PLAIN, TXT_TYPE_CLI_DATA, TXT_TYPE_SIGNED_PLAIN, TXT_TYPE_CLI_COMMAND],
+    )
+    async def test_decrypted_carries_the_text_type(self, txt_type):
+        """packet.decrypted publishes the type alongside the text.
+
+        A downstream repeater or room server dispatches on it -- firmware's
+        simple_repeater and simple_room_server both gate their CLI on
+        {PLAIN, CLI_DATA, CLI_COMMAND}, and the room server tells a post from a
+        command by type, not by reading the text. Once this handler has decoded
+        the plaintext, the type is not recoverable from the packet.
+        """
+        packet, _sender = self._typed_dm(txt_type, flood=False, text="ver")
+
+        await self.handler(packet)
+
+        assert packet.decrypted["txt_type"] == txt_type
+        assert packet.decrypted["text"] == "ver"
+        # The sender's clock, not ours: a server uses it as a replay watermark.
+        assert packet.decrypted["sender_timestamp"] == 0x5EEDBEEF
+
+    @pytest.mark.asyncio
+    async def test_decrypted_is_published_even_when_a_waiter_consumes_the_reply(self):
+        """[fails pre-fix] The intercepted CLI_DATA path publishes it too.
+
+        A CLI_DATA that resolves a pending command waiter returns early, before
+        the normal delivery block. Leaving packet.decrypted unset there hands
+        anything downstream of the handler an empty dict instead of the shape
+        the rest of the codebase relies on.
+        """
+        packet, sender = self._typed_dm(TXT_TYPE_CLI_DATA, flood=False, text="fw v1")
+        self.handler.register_command_response(sender.get_public_key(), lambda *_: None)
+
+        result = await self.handler(packet)
+
+        assert result.authenticated is True
+        assert packet.decrypted == {
+            "text": "fw v1",
+            "txt_type": TXT_TYPE_CLI_DATA,
+            "sender_timestamp": 0x5EEDBEEF,
+        }
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("text_len", [0, 11, 27])
+    async def test_body_with_no_terminator_decodes_and_acks(self, text_len):
+        """A body that exactly fills its cipher blocks has no NUL to stop at.
+
+        `5 + text_len` at 11 and 27 is a whole number of blocks, so nothing is
+        padded and the text runs to the end of the plaintext -- the case the
+        sender's old trailing NUL used to paper over. The handler has to fall
+        back on the decrypted length the way firmware's `data[len] = 0` does,
+        for both the text it shows and the ACK hash it answers with. 0 is the
+        other edge: an empty body.
+        """
+        sender = LocalIdentity()
+
+        class _Receiver:
+            public_key = self.local_identity.get_public_key().hex()
+            out_path: list = []
+            out_path_len = -1
+
+        text = "x" * text_len
+        packet, crc = PacketBuilder.create_text_message(
+            _Receiver(), sender, text, attempt=0, message_type="direct", txt_type=TXT_TYPE_PLAIN
+        )
+        self.contacts.contacts = [
+            MockContact(public_key=sender.get_public_key().hex(), name="peer")
+        ]
+
+        await self.handler(packet)
+        await self._wait_for_sends(1)
+
+        assert self.event_service.publish_sync.call_args.args[1]["message_text"] == text
+        assert self.send_packet_fn.call_count == 1
+        ack = self.send_packet_fn.call_args_list[0].args[0]
+        # The receiver's ACK must be the one the sender is waiting on.
+        assert int.from_bytes(ack.payload[:4], "little") == crc
+
+    @pytest.mark.asyncio
+    async def test_ack_policy_can_veto_the_delivery_ack(self):
+        """[fails pre-fix] A server owner decides what earns an ACK.
+
+        This handler's own rule is BaseChatMesh's, which is right for a chat
+        node. A repeater ACKs only PLAIN from an admin and a room server only
+        PLAIN from a non-guest -- both decide *before* answering, so nothing
+        they refuse is acknowledged. Without a veto here the owner's gates run
+        after the ACK has already gone out, and a sender sees delivery
+        confirmed for a message that was then thrown away.
+
+        The message is still delivered: only the ACK is withheld.
+        """
+        seen = []
+
+        def _policy(pubkey, txt_type, sender_timestamp):
+            seen.append((pubkey, txt_type, sender_timestamp))
+            return False
+
+        self.handler._should_ack = _policy
+        packet, sender = self._typed_dm(TXT_TYPE_PLAIN, flood=False, text="hi")
+
+        await self.handler(packet)
+        await self._wait_for_sends(1)
+
+        assert self.send_packet_fn.call_count == 0
+        assert seen == [(sender.get_public_key(), TXT_TYPE_PLAIN, 0x5EEDBEEF)]
+        assert self.event_service.publish_sync.called
+
+    @pytest.mark.asyncio
+    async def test_ack_policy_that_raises_withholds_the_ack(self):
+        """A broken policy must not be read as consent.
+
+        An ACK asserts that this node accepted the message. Falling back to
+        sending one when the owner's rule could not be evaluated asserts
+        something nobody checked, so the failure closes.
+        """
+
+        def _boom(pubkey, txt_type, sender_timestamp):
+            raise RuntimeError("policy exploded")
+
+        self.handler._should_ack = _boom
+        packet, _sender = self._typed_dm(TXT_TYPE_PLAIN, flood=False, text="hi")
+
+        await self.handler(packet)
+        await self._wait_for_sends(1)
+
+        assert self.send_packet_fn.call_count == 0
+
+    @pytest.mark.asyncio
+    async def test_ack_policy_that_allows_leaves_acking_unchanged(self):
+        """A permissive policy is indistinguishable from having none.
+
+        Prerequisite rather than regression proof -- it passes with the veto
+        removed too. It is here so the veto cannot grow into a blanket
+        suppression that ignores what the policy actually returned.
+        """
+        self.handler._should_ack = lambda *_: True
+        packet, _sender = self._typed_dm(TXT_TYPE_PLAIN, flood=False, text="hi")
+
+        await self.handler(packet)
+        await self._wait_for_sends(1)
+
+        assert self.send_packet_fn.call_count == 1
+        assert self.send_packet_fn.call_args_list[0].args[0].get_payload_type() == PAYLOAD_TYPE_ACK
+
+    @pytest.mark.asyncio
+    async def test_ack_policy_is_not_consulted_for_a_cli_type(self):
+        """CLI types never earned an ACK, so there is nothing to veto.
+
+        Consulting the policy anyway would invite an owner to write a rule that
+        looks like it grants one. Prerequisite rather than regression proof:
+        this passes with the veto removed, because the ACK was never owed.
+        """
+        calls = []
+        self.handler._should_ack = lambda *a: calls.append(a) or True
+        packet, _sender = self._typed_dm(TXT_TYPE_CLI_DATA, flood=False, text="ver")
+
+        await self.handler(packet)
+        await self._wait_for_sends(1)
+
+        assert calls == []
+        assert self.send_packet_fn.call_count == 0
+
+    @pytest.mark.asyncio
+    async def test_unsupported_txt_type_is_dropped_whole(self):
+        """[fails pre-fix] A type with no firmware branch reaches neither app nor air.
+
+        BaseChatMesh::onPeerDataRecv runs off the end of its if/else-if chain
+        for anything outside {PLAIN, CLI_DATA, SIGNED_PLAIN, CLI_COMMAND} and
+        only logs "unsupported message type". The payload layout past the flags
+        byte is undefined for such a type, so decoding it as text would publish
+        AES padding as message content.
+        """
+        packet, _sender = self._typed_dm(0x2A, flood=True, text="future")
+
+        result = await self.handler(packet)
+        await self._wait_for_sends(1)
+
+        # Consumed, not forwarded: it decrypted for us, so it is ours to drop.
+        assert result.authenticated is True
+        assert self.send_packet_fn.call_count == 0
+        self.event_service.publish_sync.assert_not_called()
 
 
 # Advert Handler Tests

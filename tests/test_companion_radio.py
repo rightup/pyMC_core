@@ -25,6 +25,7 @@ from openhop_core.protocol.constants import (
     PERM_ACL_GUEST,
     ROUTE_TYPE_DIRECT,
     ROUTE_TYPE_FLOOD,
+    TXT_TYPE_CLI_COMMAND,
     TXT_TYPE_CLI_DATA,
     TXT_TYPE_PLAIN,
 )
@@ -873,6 +874,123 @@ class TestRepeaterCommandCorrelation:
         assert result["success"] is True
         assert result["response"] == "fw v1.2.3"
         assert result["repeater"] == "Rpt"
+
+    def _sent_txt_type(self, comp, peer_identity, raw: bytes) -> int:
+        """Decrypt a sent TXT_MSG and return the txt_type in its flags byte."""
+        pkt = Packet()
+        assert pkt.read_from(raw)
+        secret = Identity(peer_identity.get_public_key()).calc_shared_secret(
+            comp._identity.get_private_key()
+        )
+        plaintext = CryptoUtils.mac_then_decrypt(secret[:16], secret, bytes(pkt.payload[2:]))
+        assert plaintext, "sent command did not authenticate against the peer secret"
+        return (plaintext[4] >> 2) & 0x3F
+
+    async def test_command_defaults_to_cli_data_and_can_opt_into_cli_command(self, monkeypatch):
+        """The wire type is CLI_DATA by default, CLI_COMMAND on request.
+
+        CLI_DATA stays the default because it is the one form every released
+        firmware executes -- before TXT_TYPE_CLI_COMMAND existed it *was* "a CLI
+        command", and simple_repeater still accepts it. A companion peer runs
+        only CLI_COMMAND, so the caller has to be able to ask for it.
+        """
+        radio, identity, comp, peers = self._setup(["Rpt"])
+        rpt_identity, rpt_contact = peers[0]
+        _shorten_command_timeout(monkeypatch, [0.1, 0.1])
+
+        task = asyncio.create_task(comp.send_repeater_command(rpt_contact.public_key, "ver"))
+        await _wait_until(lambda: len(radio.sent) >= 1)
+        assert self._sent_txt_type(comp, rpt_identity, radio.sent[0]) == TXT_TYPE_CLI_DATA
+        await task
+
+        task = asyncio.create_task(
+            comp.send_repeater_command(
+                rpt_contact.public_key, "ver", txt_type=TXT_TYPE_CLI_COMMAND
+            )
+        )
+        await _wait_until(lambda: len(radio.sent) >= 2)
+        assert self._sent_txt_type(comp, rpt_identity, radio.sent[1]) == TXT_TYPE_CLI_COMMAND
+        await task
+
+    async def test_command_rejects_a_non_cli_txt_type_without_sending(self):
+        """Only the two CLI types label a command; anything else never reaches the air.
+
+        PLAIN is the near miss worth guarding: a repeater does still run one
+        (its filter takes PLAIN for legacy CLI), but firmware routes PLAIN
+        through sendMessage, so it earns a delivery ACK and arms an ack wait
+        this helper never reads -- and a companion peer files it as chat rather
+        than running it. SIGNED_PLAIN and reserved values are simply not CLI.
+        """
+        radio, _identity, comp, peers = self._setup(["Rpt"])
+        _rpt_identity, rpt_contact = peers[0]
+
+        result = await comp.send_repeater_command(
+            rpt_contact.public_key, "ver", txt_type=TXT_TYPE_PLAIN
+        )
+
+        assert result["success"] is False
+        assert radio.sent == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "txt_type,expects_ack",
+    [(TXT_TYPE_CLI_DATA, False), (TXT_TYPE_CLI_COMMAND, False), (TXT_TYPE_PLAIN, True)],
+)
+async def test_cli_text_messages_arm_no_pending_ack(txt_type, expects_ack):
+    """Neither CLI type expects a delivery ACK; a plain DM still does.
+
+    Firmware sends both CLI types through sendCommandData and reports
+    expected_ack = 0 (MyMesh.cpp CMD_SEND_TXT_MSG) -- a peer answers a CLI
+    command with a CLI_DATA reply, never an ACK. Arming the table for one would
+    leave an entry that can only age out, and wait_for_ack would block for the
+    whole timeout waiting for something nobody sends. Covers both halves: the
+    local pending-ACK table and the token reported back to the app.
+    """
+    radio = MockRadio()
+    comp = CompanionRadio(radio, LocalIdentity())
+    peer = LocalIdentity()
+    comp.contacts.add(Contact(public_key=peer.get_public_key(), name="Rpt"))
+
+    result = await comp.send_text_message(
+        peer.get_public_key(), "reboot", txt_type=txt_type, wait_for_ack=False
+    )
+
+    assert result.success is True
+    assert len(radio.sent) == 1
+    assert bool(comp._pending_ack_crcs) is expects_ack
+    # The SENT frame reports this token verbatim. Firmware sets expected_ack = 0
+    # for either CLI type, so an app told a nonzero one would arm a wait for an
+    # ACK nobody sends -- a repeater answers a CLI command with a CLI_DATA reply.
+    assert bool(result.expected_ack) is expects_ack
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("txt_type", [TXT_TYPE_CLI_DATA, TXT_TYPE_CLI_COMMAND])
+async def test_cli_send_ignores_wait_for_ack(txt_type):
+    """A CLI send returns as soon as the packet is away, even if asked to wait.
+
+    Firmware never arms an ack wait for these (expected_ack = 0), and a peer
+    answers a CLI command with a CLI_DATA reply rather than an ACK. Honouring
+    wait_for_ack here would block the caller for the full send timeout on
+    every CLI command. A plain DM deliberately still waits, which is why this
+    is a separate test from the pending-ACK one.
+    """
+    radio = MockRadio()
+    comp = CompanionRadio(radio, LocalIdentity())
+    peer = LocalIdentity()
+    comp.contacts.add(Contact(public_key=peer.get_public_key(), name="Rpt"))
+
+    result = await asyncio.wait_for(
+        comp.send_text_message(
+            peer.get_public_key(), "reboot", txt_type=txt_type, wait_for_ack=True
+        ),
+        timeout=5.0,
+    )
+
+    assert result.success is True
+    assert result.expected_ack == 0
+    assert len(radio.sent) == 1
 
 
 # ---------------------------------------------------------------------------

@@ -37,6 +37,8 @@ from .constants import (
     TELEM_PERM_BASE,
     TELEM_PERM_ENVIRONMENT,
     TELEM_PERM_LOCATION,
+    TXT_TYPE_CLI_COMMAND,
+    TXT_TYPE_CLI_DATA,
     TXT_TYPE_SIGNED_PLAIN,
 )
 from .identity import Identity, LocalIdentity
@@ -1025,6 +1027,22 @@ class PacketBuilder:
         flags_byte = (txt_type << 2) | (attempt_full & 0x03)
         timestamp = timestamp if timestamp is not None else PacketBuilder._get_timestamp()
 
+        # The CLI types take firmware's sendCommandData path, which -- unlike
+        # composeMsgPacket -- has no extended-attempt tail and so no shrunken
+        # text budget to go with it. A CLI message earns no delivery ACK, so
+        # there are no repeated attempt hashes for the tail to disambiguate.
+        is_cli = txt_type in (TXT_TYPE_CLI_DATA, TXT_TYPE_CLI_COMMAND)
+
+        # The body is a C string to firmware: composeMsgPacket and
+        # sendCommandData both size it with ``strlen(text)``, so an embedded NUL
+        # ends the message. Keeping the bytes past it would send text no
+        # receiver can display -- ours stops at the first NUL too -- and would
+        # hash an expected ACK over a span the receiver never reproduces, so
+        # send_confirmed could never fire.
+        nul = message.find("\x00")
+        if nul >= 0:
+            message = message[:nul]
+
         # Firmware BaseChatMesh::composeMsgPacket rejects text longer than
         # MAX_TEXT_LEN (measured in bytes). Match it on the UTF-8 encoded length
         # so a valid MeshCore peer can build the same packet. For attempt > 3 the
@@ -1033,7 +1051,7 @@ class PacketBuilder:
         text_len = len(message.encode("utf-8"))
         if text_len > MAX_TEXT_LEN:
             raise ValueError(f"text message too long: {text_len} bytes (max {MAX_TEXT_LEN})")
-        if attempt_full > 3 and text_len > MAX_TEXT_LEN - 2:
+        if not is_cli and attempt_full > 3 and text_len > MAX_TEXT_LEN - 2:
             raise ValueError(
                 f"text message too long for extended attempt: {text_len} bytes "
                 f"(max {MAX_TEXT_LEN - 2})"
@@ -1043,10 +1061,20 @@ class PacketBuilder:
             local_identity.get_public_key()[:4] if txt_type == TXT_TYPE_SIGNED_PLAIN else b""
         )
 
-        # Body is packed as a C string (text + NUL). When attempt > 3 the firmware
-        # hides the full attempt byte after that terminator so retries whose low
-        # two bits repeat (4 → 0, 5 → 1, …) still hash uniquely.
-        tail = b"\x00" + bytes([attempt_full]) if attempt_full > 3 else b"\x00"
+        # The body ends at the text: firmware writes the C-string terminator into
+        # its scratch buffer (``memcpy(&temp[5], text, text_len + 1)``) but hands
+        # ``createDatagram`` only ``5 + text_len``, so the NUL is never on the
+        # wire. It does not need to be — the receiver null-terminates past the
+        # decrypted length itself (``data[len] = 0``), and AES zero-padding
+        # supplies a terminator for every length that is not already a whole
+        # number of blocks.
+        #
+        # The one exception is a plain retry above attempt 3: composeMsgPacket
+        # then appends the terminator *and* the full attempt byte, so retries
+        # whose low two bits repeat (4 → 0, 5 → 1, …) still hash uniquely.
+        # sendCommandData -- the CLI path -- has no such tail.
+        extended = attempt_full > 3 and not is_cli
+        tail = b"\x00" + bytes([attempt_full]) if extended else b""
         plaintext = PacketBuilder._pack_timestamp_data(
             timestamp, flags_byte, signed_sender_prefix, message, tail
         )
@@ -1056,12 +1084,27 @@ class PacketBuilder:
             contact, local_identity, plaintext
         )
 
-        # Calculate CRC using centralized packing
+        # Calculate CRC using centralized packing.
+        #
+        # Which key salts the hash depends on the type, because the receiver
+        # salts it differently. For plain text both sides use the *sender's*
+        # key: composeMsgPacket hashes with `self_id.pub_key` and the receiver
+        # answers with `from.id.pub_key` (BaseChatMesh::onPeerDataRecv). Signed
+        # text inverts that -- the receiver hashes with its own key
+        # (`self_id.pub_key` on the receiving side), so a sender predicting the
+        # ACK has to use the *recipient's* key, exactly as firmware's room
+        # server does when it pushes a post
+        # (simple_room_server::pushPostToClient: `client->id.pub_key`).
         crc_input = PacketBuilder._pack_timestamp_data(
             timestamp, flags_byte, signed_sender_prefix, message
         )
+        ack_key = (
+            bytes.fromhex(contact.public_key)
+            if txt_type == TXT_TYPE_SIGNED_PLAIN
+            else local_identity.get_public_key()
+        )
         ack_crc = int.from_bytes(
-            CryptoUtils.sha256(crc_input + local_identity.get_public_key())[:4],
+            CryptoUtils.sha256(crc_input + ack_key)[:4],
             "little",
         )
 

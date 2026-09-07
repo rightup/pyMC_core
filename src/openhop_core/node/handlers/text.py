@@ -4,6 +4,7 @@ from ...protocol import CryptoUtils, Identity, Packet, PacketBuilder, PathUtils
 from ...protocol.constants import (
     PAYLOAD_TYPE_ACK,
     PAYLOAD_TYPE_TXT_MSG,
+    TXT_TYPE_CLI_COMMAND,
     TXT_TYPE_CLI_DATA,
     TXT_TYPE_PLAIN,
     TXT_TYPE_SIGNED_PLAIN,
@@ -22,6 +23,12 @@ TXT_ACK_DELAY_MS = 200
 # firmware's `d += 300` in BaseChatMesh::sendAckTo.
 MULTI_ACK_STAGGER_MS = 300
 
+# The text types BaseChatMesh::onPeerDataRecv has a branch for. Anything else
+# hits its trailing `else` ("unsupported message type") and is dropped whole.
+SUPPORTED_TXT_TYPES = frozenset(
+    (TXT_TYPE_PLAIN, TXT_TYPE_CLI_DATA, TXT_TYPE_SIGNED_PLAIN, TXT_TYPE_CLI_COMMAND)
+)
+
 
 class TextMessageHandler(BaseHandler):
     @staticmethod
@@ -36,17 +43,36 @@ class TextMessageHandler(BaseHandler):
         send_packet_fn,
         event_service=None,
         radio_config=None,
+        should_ack_fn=None,
     ):
         self.local_identity = local_identity
         self.contacts = contacts
         self.log = log_fn
         self.send_packet = send_packet_fn
         self.event_service = event_service  # Event service for broadcasting
+        # Optional veto on the delivery ACK, for an owner that is a *server*
+        # rather than a chat node. This handler's own rule is BaseChatMesh's --
+        # ACK plain and signed text, never a CLI type -- which is right for a
+        # companion. A repeater or room server accepts far less: firmware's
+        # simple_repeater ACKs only PLAIN from an admin, and simple_room_server
+        # only PLAIN from a non-guest, deciding *before* it answers so nothing
+        # it refuses is ever acknowledged. Those owners pass a predicate here.
+        #
+        #     should_ack_fn(sender_pubkey, txt_type, sender_timestamp) -> bool
+        #
+        # It must not mutate state (in particular it must not advance a replay
+        # watermark): it is a second read of the same message the owner will
+        # judge again on delivery. An exception is treated as "do not ACK" --
+        # an ACK asserts acceptance, and asserting that on a broken hook is the
+        # worse failure.
+        self._should_ack = should_ack_fn
         # Pending repeater-command responses keyed by the target contact's full
         # public key (32 bytes). A CLI_DATA reply is delivered to the waiter for
         # its authenticated sender only; every other message flows to normal
         # delivery, mirroring firmware BaseChatMesh (only TXT_TYPE_CLI_DATA from a
-        # known contact is routed to onCommandDataRecv).
+        # known contact reaches onCommandDataRecv, which is the reply path).
+        # TXT_TYPE_CLI_COMMAND travels the other way — it is a command someone
+        # sent *to* us — so it never resolves one of these waiters.
         self._pending_command_responses = {}  # pubkey bytes -> callback
         self.radio_config = radio_config or {}  # Radio configuration for airtime calculations
         self.multi_acks = 0  # multi_acks pref (0=off); set via set_multi_acks()
@@ -211,6 +237,20 @@ class TextMessageHandler(BaseHandler):
             (ack_packet, (base_delay_ms + MULTI_ACK_STAGGER_MS) / 1000.0),
         ]
 
+    def _ack_allowed(self, sender_pubkey: bytes, txt_type: int, sender_timestamp: int) -> bool:
+        """Ask the owner whether this message earns a delivery ACK.
+
+        No policy means the BaseChatMesh rule this handler already implements,
+        which is correct for a chat node. See ``should_ack_fn`` in ``__init__``.
+        """
+        if self._should_ack is None:
+            return True
+        try:
+            return bool(self._should_ack(sender_pubkey, txt_type, sender_timestamp))
+        except Exception as e:
+            self.log(f"ACK policy raised, withholding ACK: {e}")
+            return False
+
     async def _send_delayed_ack(self, pkt, delay_s, timestamp_int) -> None:
         """Send a single ACK packet after ``delay_s`` seconds (best-effort)."""
         await asyncio.sleep(delay_s)
@@ -292,6 +332,17 @@ class TextMessageHandler(BaseHandler):
         flags = decrypted[4]  # 5th byte contains flags
         txt_type = (flags >> 2) & 0x3F  # Upper 6 bits are txt_type
         message_body = decrypted[5:]  # Rest is the message content
+
+        if txt_type not in SUPPORTED_TXT_TYPES:
+            # Firmware BaseChatMesh::onPeerDataRecv runs off the end of its
+            # if/else-if chain here and only logs "unsupported message type":
+            # no ACK, no contact bookkeeping, nothing handed to the app. The
+            # payload layout past the flags byte is undefined for a type we do
+            # not know, so decoding it as text would surface AES padding (and,
+            # for a future type, framing bytes) as message content.
+            self.log(f"Unsupported TXT_MSG type {txt_type}; dropping")
+            return HandlerResult.consumed()
+
         sender_prefix = b""
         if txt_type == TXT_TYPE_SIGNED_PLAIN:
             # Signed plain text (e.g. room server posts): a 4-byte author
@@ -345,6 +396,10 @@ class TextMessageHandler(BaseHandler):
             txt_type, decrypted, message_body, sender_pubkey, timestamp_int, flags
         )
 
+        if ack_hash is not None and not self._ack_allowed(sender_pubkey, txt_type, timestamp_int):
+            self.log(f"ACK for txt_type={txt_type} vetoed by the owner's policy")
+            ack_hash = None
+
         if ack_hash is not None:
             scheduled = self._build_ack_responses(
                 packet=packet,
@@ -370,12 +425,35 @@ class TextMessageHandler(BaseHandler):
         decoded_msg = message_body[:visible_len].decode("utf-8", "replace")
         self.log(f"Received TXT_MSG: {decoded_msg}")
 
+        # Publish the text, its type and the sender's timestamp before any branch
+        # below can return, so every caller sees the same shape whether or not
+        # the message is intercepted. All three ride along because a downstream
+        # node needs them and cannot recover them once the plaintext is gone:
+        # firmware's simple_repeater and simple_room_server gate their CLI on
+        # the type ({PLAIN, CLI_DATA, CLI_COMMAND}, and the room server tells a
+        # post from a command by it), and both guard replays on the timestamp
+        # against the client's stored watermark. It is the *sender's* clock,
+        # which may be wrong -- it is a replay watermark, not a wall clock.
+        packet.decrypted = {
+            "text": decoded_msg,
+            "txt_type": txt_type,
+            "sender_timestamp": timestamp_int,
+        }
+
         # Intercept as a repeater-command response only for CLI_DATA replies whose
         # authenticated sender has a pending command (firmware routes only
         # TXT_TYPE_CLI_DATA from a known contact to onCommandDataRecv; everything
         # else is delivered normally). Match on the full sender public key so a
         # dest-hash collision cannot cross-resolve. Plain DMs and CLI_DATA with no
         # pending command fall through to normal delivery.
+        #
+        # TXT_TYPE_CLI_COMMAND falls through too. Firmware hands it to
+        # onCLICommandRecv, which runs the command locally only when the sender
+        # is flagged isRemoteCLIAllowed() and otherwise queues it for the app
+        # (companion_radio/MyMesh.cpp). Core has no CLI of its own to run, so the
+        # queue-for-the-app branch is the whole of its behaviour: the command is
+        # published as a message carrying txt_type 3, and whoever is driving the
+        # node decides whether to answer it (with a CLI_DATA reply).
         if txt_type == TXT_TYPE_CLI_DATA:
             callback = self._pending_command_responses.get(sender_pubkey)
             if callback is not None:
@@ -441,6 +519,4 @@ class TextMessageHandler(BaseHandler):
             except Exception as broadcast_error:
                 self.log(f"Failed to publish new message event: {broadcast_error}")
 
-        # Set packet.decrypted for ACK processing
-        packet.decrypted = {"text": decoded_msg}
         return HandlerResult.consumed()

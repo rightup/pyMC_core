@@ -994,10 +994,19 @@ class _Proxy:
 
 
 class _RetrySender(_SendOpsMixin):
-    """Carrier for the retry loops with radio/timing stubbed out."""
+    """Carrier for the retry loops with radio/timing stubbed out.
+
+    ``_apply_flood_scope`` records rather than resolves: the region a request
+    ends up with is the companion resolver's business, but *whether* the loop
+    hands every attempt to it is this file's.
+    """
 
     def __init__(self):
         self.sent = []
+        self.scoped = []
+
+    def _apply_flood_scope(self, pkt):
+        self.scoped.append(pkt)
 
     def _apply_path_hash_mode(self, pkt):
         return None
@@ -1050,38 +1059,41 @@ def test_retry_packet_floods_a_contact_that_has_a_direct_path():
     assert proxy.out_path == OUT_PATH
 
 
-def test_forced_flood_retry_is_unscoped_and_survives_a_configured_scope():
-    """A region-scoped retry dies at the first region-less repeater.
+def test_forced_flood_retry_takes_the_nodes_flood_scope():
+    """[fails pre-fix] The retry is scoped like any other flood send.
 
-    Most repeaters on a mixed mesh have no regions configured, so they cannot
-    match a transport code and refuse to forward a TRANSPORT_FLOOD packet
-    (``allowPacketForward``: ``recv_pkt_region == NULL``). Scoping the retry would
-    make it strictly worse than the direct attempt it replaces, so the forced
-    flood is marked as a deliberate plain-flood decision that the dispatcher's
-    override/default resolver must not override.
+    Masking ``out_path_len`` is the whole of firmware's trick: ``sendRequest``
+    then takes its ``sendFloodScoped(recipient, pkt)`` branch, which resolves the
+    region exactly as every other companion flood does. The retry must therefore
+    come back un-marked, so that whichever resolver sees it next -- the
+    companion's own, or the dispatcher's at TX -- is free to scope it. This test
+    drives the dispatcher half. Marking it plain-flood instead strands the retry
+    at hop 0 on any mesh running ``flood.max.unscoped = 0`` -- which is exactly
+    the set of meshes that scope their traffic in the first place.
     """
     from openhop_core.node.dispatcher import Dispatcher
     from openhop_core.protocol.constants import ROUTE_TYPE_TRANSPORT_FLOOD
-    from openhop_core.protocol.transport_keys import get_auto_key_for
+    from openhop_core.protocol.transport_keys import calc_transport_code, get_auto_key_for
 
     proxy = _Proxy()
     sender = _RetrySender()
 
     pkt, _tag = sender._build_retry_packet(_req_builder(proxy), proxy, "REQ")
     assert pkt.is_route_flood()
-    assert pkt._flood_scope_applied is True
+    assert getattr(pkt, "_flood_scope_applied", False) is False
 
     class _Radio:
         def set_rx_callback(self, cb):
             pass
 
+    override_key = get_auto_key_for("#region-a")
     dispatcher = Dispatcher(_Radio())
-    dispatcher.flood_transport_key = get_auto_key_for("#region-a")
+    dispatcher.flood_transport_key = override_key
     dispatcher.default_flood_transport_key = get_auto_key_for("#region-b")
     dispatcher._apply_flood_scope(pkt)
 
-    assert pkt.get_route_type() != ROUTE_TYPE_TRANSPORT_FLOOD
-    assert pkt.transport_codes == [0, 0]
+    assert pkt.get_route_type() == ROUTE_TYPE_TRANSPORT_FLOOD
+    assert pkt.transport_codes[0] == calc_transport_code(override_key, pkt)
 
 
 def test_retry_packet_restores_the_stored_path_when_the_builder_raises():
@@ -1149,6 +1161,9 @@ async def test_request_retry_loop_floods_every_attempt_after_the_first():
     assert not sender.sent[0].is_route_flood(), "first attempt keeps the stored route"
     assert all(p.is_route_flood() for p in sender.sent[1:]), "every retry floods"
     assert proxy.out_path_len == OUT_PATH_LEN
+    # Firmware sends every one of these through sendFloodScoped(recipient, pkt),
+    # so every attempt -- retries included -- must reach the scope resolver.
+    assert sender.scoped == sender.sent
 
 
 @pytest.mark.asyncio
@@ -1172,3 +1187,4 @@ async def test_started_request_retry_loop_floods_every_retry():
     assert sender.sent, "the continuation must retry"
     assert all(p.is_route_flood() for p in sender.sent), "every retry floods"
     assert proxy.out_path_len == OUT_PATH_LEN
+    assert sender.scoped == sender.sent

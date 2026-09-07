@@ -39,6 +39,7 @@ from .constants import (
     PROTOCOL_CODE_BINARY_REQ,
     PROTOCOL_CODE_RAW_DATA,
     PUSH_CODE_TELEMETRY_RESPONSE,
+    TXT_TYPE_CLI_COMMAND,
     TXT_TYPE_CLI_DATA,
     TXT_TYPE_PLAIN,
 )
@@ -403,8 +404,11 @@ class _SendOpsMixin:
         When wait_for_ack is True (default), blocks until ACK or timeout.
         When wait_for_ack is False, returns as soon as the packet is handed off;
         ACK (if any) is still tracked and will trigger send_confirmed later.
-        For ``txt_type == TXT_TYPE_CLI_DATA``, delivery ACK is not used on MeshCore
-        repeaters; ``wait_for_ack`` is treated as False and pending ACK is not tracked.
+        For the CLI types (``TXT_TYPE_CLI_DATA`` and ``TXT_TYPE_CLI_COMMAND``),
+        delivery ACK is not used on MeshCore repeaters; ``wait_for_ack`` is
+        treated as False and pending ACK is not tracked. Firmware routes both to
+        ``sendCommandData`` with ``expected_ack = 0`` (MyMesh.cpp
+        CMD_SEND_TXT_MSG).
         """
         contact = self.contacts.get_by_key(pub_key)
         if not contact:
@@ -430,8 +434,15 @@ class _SendOpsMixin:
             )
             self._apply_flood_scope(pkt)
             self._apply_path_hash_mode(pkt)
-            effective_wait_ack = wait_for_ack and txt_type != TXT_TYPE_CLI_DATA
-            if txt_type != TXT_TYPE_CLI_DATA:
+            is_cli = txt_type in (TXT_TYPE_CLI_DATA, TXT_TYPE_CLI_COMMAND)
+            # Firmware reports expected_ack = 0 for either CLI type (MyMesh.cpp
+            # CMD_SEND_TXT_MSG) and skips its expected_ack_table entry on a zero
+            # token. Reporting the CRC instead tells the app to wait for an ACK
+            # that a repeater never sends -- it answers a CLI command with a
+            # CLI_DATA reply.
+            reported_ack = 0 if is_cli else ack_crc
+            effective_wait_ack = wait_for_ack and not is_cli
+            if not is_cli:
                 self._track_pending_ack(ack_crc)
             if effective_wait_ack:
                 success = await self._send_packet(pkt, wait_for_ack=True, expected_crc=ack_crc)
@@ -442,7 +453,7 @@ class _SendOpsMixin:
                 return SentResult(
                     success=success,
                     is_flood=is_flood,
-                    expected_ack=ack_crc,
+                    expected_ack=reported_ack,
                     timeout_ms=None,
                 )
             success = await self._send_packet(pkt, wait_for_ack=False)
@@ -453,7 +464,7 @@ class _SendOpsMixin:
             return SentResult(
                 success=success,
                 is_flood=is_flood,
-                expected_ack=ack_crc,
+                expected_ack=reported_ack,
                 timeout_ms=DEFAULT_RESPONSE_TIMEOUT_MS,
             )
         except Exception as e:
@@ -727,6 +738,7 @@ class _SendOpsMixin:
                 pkt, packet_tag = self._build_retry_packet(build_packet, proxy, log_label)
                 if response_tag_registered is not None and packet_tag is not None:
                     response_tag_registered(packet_tag)
+                self._apply_flood_scope(pkt)
                 self._apply_path_hash_mode(pkt)
                 timeout_s = self._response_timeout_s(pkt, proxy)
                 if deadline is not None:
@@ -774,6 +786,7 @@ class _SendOpsMixin:
             pkt, packet_tag = build_packet()
             if response_tag_registered is not None and packet_tag is not None:
                 response_tag_registered(packet_tag)
+            self._apply_flood_scope(pkt)
             self._apply_path_hash_mode(pkt)
             estimated_timeout_s = self._response_timeout_s(pkt, proxy)
             wait_timeout_s = estimated_timeout_s
@@ -1005,6 +1018,7 @@ class _SendOpsMixin:
         pkt = PacketBuilder.create_login_packet(
             contact=proxy, local_identity=self._identity, password=password
         )
+        self._apply_flood_scope(pkt)
         self._apply_path_hash_mode(pkt)
         timeout_s = self._response_timeout_s(pkt, proxy)
         logger.debug(
@@ -1210,6 +1224,7 @@ class _SendOpsMixin:
                 pkt, packet_tag = self._build_retry_packet(build_packet, proxy, log_label)
             if response_tag_registered is not None and packet_tag is not None:
                 response_tag_registered(packet_tag)
+            self._apply_flood_scope(pkt)
             self._apply_path_hash_mode(pkt)
             timeout_s = self._response_timeout_s(pkt, proxy)
             if deadline is not None:
@@ -1244,12 +1259,13 @@ class _SendOpsMixin:
         both directions: either the request never reached the peer, or the peer
         answered DIRECT down a route back to us that no longer works. Flooding
         the retry addresses both — it reaches the peer without depending on the
-        stored path, and a peer answers a *flood* request with a PATH-return
-        (``simple_repeater``/``BaseChatMesh`` ``onPeerDataRecv``), which is a real
-        observed inbound path for the return-path teacher to teach from. The
-        alternative — assuming the route is symmetric and teaching its reverse —
-        is wrong whenever it is not, and a peer taught a wrong route answers into
-        a void with no flood reply left to correct it.
+        stored path, and a peer answers a *flood* REQ or ANON_REQ with a
+        PATH-return (``simple_repeater`` ``onPeerDataRecv``/``onAnonDataRecv``,
+        ``BaseChatMesh::onPeerDataRecv``), which is a real observed inbound path
+        for the return-path teacher to teach from. The alternative — assuming the
+        route is symmetric and teaching its reverse — is wrong whenever it is not,
+        and a peer taught a wrong route answers into a void with no flood reply
+        left to correct it.
 
         Mirrors how firmware forces a single request to flood
         (``companion_radio/MyMesh.cpp``)::
@@ -1264,15 +1280,16 @@ class _SendOpsMixin:
         rather than discarding it. ``build_packet`` is synchronous, so no other
         task can observe the mask, and it is restored on every exit path.
 
-        The forced flood is sent **unscoped**, marked ``_flood_scope_applied`` so
-        neither the companion nor the dispatcher resolver stamps a region on it.
-        A region-scoped retry is worse than no retry at all on a mixed mesh: a
-        repeater that has no regions configured cannot match the transport code,
-        so ``allowPacketForward`` refuses it (``simple_repeater/MyMesh.cpp``:
-        ``recv_pkt_region == NULL`` for a flood packet) and the retry dies at the
-        first hop — while the direct attempt it replaces at least had a route. The
-        trade-off is a mesh whose repeaters deny unscoped floods outright, where
-        the reverse holds; reach in the common case wins.
+        The packet comes back un-scoped; the caller runs it through
+        ``_apply_flood_scope`` like any other flood send. Masking ``out_path_len``
+        is all firmware does too: ``sendRequest`` then takes its
+        ``sendFloodScoped(recipient, pkt)`` branch, which resolves the region the
+        same way as every other companion flood (send_unscoped, else the
+        transient send_scope, else the persisted default). Marking the retry
+        plain-flood instead would strand it at hop 0 on a mesh whose repeaters
+        run ``flood.max.unscoped = 0`` — precisely the meshes that scope their
+        traffic — so the recovery attempt would fail exactly where the first
+        attempt already had.
         """
         saved = getattr(proxy, "out_path_len", None)
         if saved is None or saved < 0:
@@ -1287,8 +1304,7 @@ class _SendOpsMixin:
         finally:
             proxy.out_path_len = saved
         if pkt is not None and pkt.is_route_flood():
-            pkt._flood_scope_applied = True
-            logger.debug("[PATHDIAG] %s: retry forced to unscoped FLOOD", log_label)
+            logger.debug("[PATHDIAG] %s: retry forced to FLOOD", log_label)
         return pkt, tag
 
     async def _wait_for_path_propagation(self, proxy: Any, request_type: str) -> None:
@@ -1527,9 +1543,29 @@ class _SendOpsMixin:
                 proto_handler.clear_response_callback(pub_key, request_tag)
 
     async def send_repeater_command(
-        self, pub_key: bytes, command: str, parameters: Optional[str] = None
+        self,
+        pub_key: bytes,
+        command: str,
+        parameters: Optional[str] = None,
+        txt_type: int = TXT_TYPE_CLI_DATA,
     ) -> dict:
-        """Send a text-based command to a repeater and wait for the response."""
+        """Send a text-based command to a repeater and wait for the response.
+
+        ``txt_type`` selects how the command is labelled on the wire.
+        ``TXT_TYPE_CLI_DATA`` is the default because it is the only form every
+        released firmware executes: before ``TXT_TYPE_CLI_COMMAND`` existed,
+        CLI_DATA meant "a CLI command" and the receiver ran it. Newer firmware
+        splits the two — a command is CLI_COMMAND, its reply is CLI_DATA — but
+        still accepts CLI_DATA as a command (``simple_repeater``
+        ``onPeerDataRecv`` takes PLAIN, CLI_DATA or CLI_COMMAND; the companion
+        ``BaseChatMesh`` runs only CLI_COMMAND). Pass ``TXT_TYPE_CLI_COMMAND``
+        to address a companion, which no longer executes CLI_DATA.
+
+        Either way the reply comes back as CLI_DATA, which is what the pending
+        command-response waiter matches on.
+        """
+        if txt_type not in (TXT_TYPE_CLI_DATA, TXT_TYPE_CLI_COMMAND):
+            return {"success": False, "reason": f"Unsupported CLI txt_type {txt_type}"}
         contact = self.contacts.get_by_key(pub_key)
         if not contact:
             return {"success": False, "reason": "Contact not found"}
@@ -1563,8 +1599,9 @@ class _SendOpsMixin:
                 message=full_command,
                 attempt=1,
                 message_type=msg_type,
-                txt_type=TXT_TYPE_CLI_DATA,
+                txt_type=txt_type,
             )
+            self._apply_flood_scope(pkt)
             self._apply_path_hash_mode(pkt)
             await self._send_packet(pkt, wait_for_ack=False)
             try:
