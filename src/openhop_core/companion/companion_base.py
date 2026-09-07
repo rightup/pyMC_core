@@ -126,6 +126,10 @@ class CompanionBase(
         self._event_service.subscribe_all(self._event_subscriber)
 
         self._push_callbacks: dict[str, list[Callable]] = {k: [] for k in PUSH_CALLBACK_KEYS}
+        # Adapters built by the legacy positional on_*_received registrars,
+        # memoized by (event, original callable) so registering the same legacy
+        # callback twice reuses one adapter instead of stacking a fresh closure.
+        self._legacy_push_adapters: dict[tuple[str, Callable], Callable] = {}
 
         # Pending binary requests by tag (hex) for matching responses
         self._pending_binary_requests: dict[str, dict] = {}

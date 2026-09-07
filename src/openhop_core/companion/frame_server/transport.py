@@ -83,6 +83,10 @@ class _FrameTransportMixin:
             self._server.close()
             await self._server.wait_closed()
             self._server = None
+        # The bridge outlives this server, so a stopped server must stop
+        # receiving its events — otherwise it keeps pushing at a closed writer,
+        # and a replacement server built on the same bridge doubles every event.
+        self._teardown_push_callbacks()
         logger.info("Companion frame server stopped (port=%s)", self.port)
 
     def _enqueue_frame(self, data: bytes) -> None:

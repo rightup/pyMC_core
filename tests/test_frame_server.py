@@ -1647,26 +1647,17 @@ async def test_cmd_send_anon_req_success_writes_sent():
 def test_binary_response_push_only_for_owned_tag():
     """Unowned non-region responses are ignored; owned and region responses pass."""
     bridge = Mock()
-    for cb_name in (
-        "on_message_event",
-        "on_channel_message_event",
-        "on_channel_data_event",
-        "on_send_confirmed",
-        "on_advert_received",
-        "on_node_discovered",
-        "on_contact_path_updated",
-        "on_binary_response",
-        "on_path_discovery_response",
-        "on_contact_deleted",
-        "on_contacts_full",
-        "on_raw_data_received",
-    ):
-        setattr(bridge, cb_name, Mock())
     server = CompanionFrameServer(bridge, "hash", port=0)
     server._write_queue = asyncio.Queue(maxsize=16)
     server._setup_push_callbacks()
 
-    on_binary = bridge.on_binary_response.call_args[0][0]
+    # Take the handler the server actually subscribed for this event, so the
+    # test fails if that subscription is ever dropped.
+    on_binary = next(
+        call.args[1]
+        for call in bridge.add_push_callback.call_args_list
+        if call.args[0] == "binary_response"
+    )
     tag = 0x11223344
     tag_bytes = struct.pack("<I", tag)
 

@@ -28,29 +28,49 @@ from .frames import _build_advert_push_frames
 
 logger = logging.getLogger("CompanionFrameServer")
 
+# (push event, handler attribute) for every bridge event this frame server
+# subscribes to.  Declared once so setup and teardown cannot drift: teardown
+# retracting less than setup registered is exactly how a stale closure survives
+# a reconnect, which is what the clear-everything approach used to prevent.
+_PUSH_SUBSCRIPTIONS = (
+    ("message_event", "_on_message_event"),
+    ("channel_message_event", "_on_channel_message_event"),
+    ("channel_data_event", "_on_channel_data_event"),
+    ("send_confirmed", "_on_send_confirmed"),
+    ("advert_received", "_on_advert_received"),
+    ("node_discovered", "_on_node_discovered"),
+    ("contact_path_updated", "_on_contact_path_updated"),
+    ("binary_response", "_on_binary_response"),
+    ("path_discovery_response", "_on_path_discovery_response"),
+    ("contact_deleted", "_on_contact_deleted"),
+    ("contacts_full", "_on_contacts_full"),
+    ("raw_data_received", "_on_raw_data_received"),
+    ("trace_received", "_on_trace_received"),
+)
+
 
 class _PushMixin:
     """Bridge-event push callbacks and public push_* methods of
     :class:`CompanionFrameServer`."""
 
     def _setup_push_callbacks(self) -> None:
-        """Subscribe to bridge events and send PUSH frames to connected client."""
-        # Clear any callbacks registered by a previous connection so they
-        # don't accumulate across reconnections.
-        self.bridge.clear_push_callbacks()
-        self.bridge.on_message_event(self._on_message_event)
-        self.bridge.on_channel_message_event(self._on_channel_message_event)
-        self.bridge.on_channel_data_event(self._on_channel_data_event)
-        self.bridge.on_send_confirmed(self._on_send_confirmed)
-        self.bridge.on_advert_received(self._on_advert_received)
-        self.bridge.on_node_discovered(self._on_node_discovered)
-        self.bridge.on_contact_path_updated(self._on_contact_path_updated)
-        self.bridge.on_binary_response(self._on_binary_response)
-        self.bridge.on_path_discovery_response(self._on_path_discovery_response)
-        self.bridge.on_contact_deleted(self._on_contact_deleted)
-        self.bridge.on_contacts_full(self._on_contacts_full)
-        self.bridge.on_raw_data_received(self._on_raw_data_received)
-        self.bridge.on_trace_received(self._on_trace_received)
+        """Subscribe to bridge events and send PUSH frames to connected client.
+
+        Only this frame server's own subscriptions are retracted first.  The
+        bridge is shared — a host repeater exposes the same events to an SSE
+        stream and to plug-ins — and clearing every callback here silently
+        unsubscribed those the moment a companion app connected, with no way for
+        them to notice.  The registrations are bound methods of ``self``, so
+        they are stable across calls and drop out cleanly by name.
+        """
+        self._teardown_push_callbacks()
+        for event_name, handler_name in _PUSH_SUBSCRIPTIONS:
+            self.bridge.add_push_callback(event_name, getattr(self, handler_name))
+
+    def _teardown_push_callbacks(self) -> None:
+        """Retract this frame server's bridge subscriptions, leaving others alone."""
+        for event_name, handler_name in _PUSH_SUBSCRIPTIONS:
+            self.bridge.remove_push_callback(event_name, getattr(self, handler_name))
 
     # -------------------------------------------------------------------------
     # Bridge event callbacks (registered by _setup_push_callbacks)
