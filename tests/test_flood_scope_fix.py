@@ -17,6 +17,7 @@ import asyncio
 import contextlib
 import struct
 import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -1056,3 +1057,83 @@ class TestRegionCaptureBothEntrypoints:
 
         assert pkt._recv_region_captured is False
         assert pkt._recv_region_key is None
+
+
+class TestBuilderFreshnessIsEnforced:
+    """A request builder that reuses a packet is caught, not silently obeyed.
+
+    Both send-layer resolvers skip a packet already carrying a decision, which
+    is what lets a decided reply keep its region. The side effect is that a
+    *reused* packet is indistinguishable from a decided one: the second caller
+    of a caching builder would get a packet the first attempt already marked,
+    and its send would skip scoping and go out plain. Since the failure is
+    invisible downstream, ``_take_built_packet`` rejects it at the builder.
+
+    Every builder in the tree constructs through ``PacketBuilder``, so this
+    guards against a future edit rather than anything reachable today.
+    """
+
+    @staticmethod
+    def _fresh_builder():
+        return lambda: (_make_flood_packet(), 7)
+
+    def test_a_fresh_builder_passes_through_with_its_tag(self):
+        companion = _make_companion()
+        pkt, tag = companion._take_built_packet(self._fresh_builder())
+        assert pkt._flood_scope_applied is False
+        assert tag == 7
+
+    def test_a_builder_reusing_a_scoped_packet_is_rejected(self):
+        """The live hazard: attempt 1 marks it, so the retry would skip scoping."""
+        companion = _make_companion()
+        cached = _make_flood_packet()
+        companion._apply_flood_scope(cached)  # what attempt 1 does
+        assert cached._flood_scope_applied is True
+
+        with pytest.raises(ValueError, match="already carries send-time"):
+            companion._take_built_packet(lambda: (cached, None))
+
+    def test_a_builder_reusing_a_path_hash_marked_packet_is_rejected(self):
+        """``_path_hash_mode_applied`` suppresses the dispatcher the same way.
+
+        Every send site pairs ``_apply_flood_scope`` with
+        ``_apply_path_hash_mode``, and ``Packet.read_from`` clears both together,
+        so a packet carrying either mark is equally stale.
+        """
+        companion = _make_companion()
+        cached = _make_flood_packet()
+        cached.apply_path_hash_mode(0, mark_applied=True)
+        assert cached._path_hash_mode_applied is True
+        assert cached._flood_scope_applied is False, "isolates this mark from the other"
+
+        with pytest.raises(ValueError, match="already carries send-time"):
+            companion._take_built_packet(lambda: (cached, None))
+
+    def test_the_retry_path_is_where_the_guard_sits(self):
+        """``_build_retry_packet`` is the chokepoint every retry flows through.
+
+        Its docstring promises the packet comes back un-scoped for the caller to
+        resolve; this holds it to that. A caching builder trips it even on the
+        forced-flood branch, where ``out_path_len`` is masked before the call.
+        """
+        companion = _make_companion()
+        proxy = SimpleNamespace(out_path_len=1)
+
+        cached = _make_flood_packet()
+        companion._apply_flood_scope(cached)
+        with pytest.raises(ValueError, match="already carries send-time"):
+            companion._build_retry_packet(lambda: (cached, None), proxy, "retry")
+
+        # The mask is restored even though the builder's contract was broken.
+        assert proxy.out_path_len == 1
+
+    def test_a_per_call_builder_still_retries_normally(self):
+        """The guard must not disarm the ordinary retry path."""
+        companion = _make_companion()
+        proxy = SimpleNamespace(out_path_len=1)
+
+        pkt, tag = companion._build_retry_packet(self._fresh_builder(), proxy, "retry")
+
+        assert pkt._flood_scope_applied is False, "retry must reach the caller un-scoped"
+        assert tag == 7
+        assert proxy.out_path_len == 1

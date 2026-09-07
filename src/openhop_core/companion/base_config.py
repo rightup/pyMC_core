@@ -346,9 +346,13 @@ class _DeviceConfigMixin:
         # Checked FIRST, as Dispatcher._apply_flood_scope does: a scope the
         # reply helper already decided outranks this node's send state, and a
         # reply deliberately left plain (chooseReplyScope NONE, mirroring an
-        # un-scoped request) must not be scoped here. Every call site below
-        # builds its packet immediately before calling this, so a fresh packet
-        # is never affected.
+        # un-scoped request) must not be scoped here.
+        #
+        # The send paths are unaffected because each builds its packet
+        # immediately before calling this. Where that packet comes from a
+        # builder callable rather than an inline PacketBuilder call, the
+        # freshness this relies on is enforced rather than assumed -- see
+        # ``_SendOpsMixin._take_built_packet``.
         if getattr(pkt, "_flood_scope_applied", False):
             return
         route_type = pkt.get_route_type()
