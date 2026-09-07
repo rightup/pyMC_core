@@ -235,8 +235,7 @@ class TestDispatcherInitialization:
         assert PAYLOAD_TYPE_MULTIPART in dispatcher._handlers
 
         crc = 0x12345678
-        evt = asyncio.Event()
-        dispatcher._waiting_acks[crc] = evt
+        evt = dispatcher.expect_ack(crc)
 
         # wrapper byte (remaining=1, inner=ACK) + 4-byte CRC (little-endian 0x12345678)
         payload = bytes([(1 << 4) | PAYLOAD_TYPE_ACK]) + b"\x78\x56\x34\x12"
@@ -340,8 +339,7 @@ class TestDispatcherACKSystem:
         crc = 0x12345678
 
         # Start waiting for ACK
-        ack_event = asyncio.Event()
-        dispatcher._waiting_acks[crc] = ack_event
+        ack_event = dispatcher.expect_ack(crc)
 
         # Simulate receiving ACK
         await dispatcher._register_ack_received(crc)
@@ -357,7 +355,7 @@ class TestDispatcherACKSystem:
     async def test_ack_timeout_cleanup(self, dispatcher):
         """Test ACK timeout and cleanup."""
         crc = 0x12345678
-        dispatcher._waiting_acks[crc] = asyncio.Event()
+        dispatcher.expect_ack(crc)
 
         # Simulate the cleanup logic from run_forever without the infinite loop
         # Clean out old ACK CRCs (older than 5 seconds)
@@ -424,29 +422,75 @@ class TestDispatcherWaitForAckCleanup:
         assert crc not in dispatcher._waiting_acks
 
     @pytest.mark.asyncio
-    async def test_stale_waiter_does_not_remove_newer_registration(self, dispatcher):
-        """If a stale waiter's cleanup runs after a *different* Event has been
-        registered under the same CRC (e.g. a fresh wait_for_ack() call took
-        over that slot), the stale cleanup must be a no-op rather than
-        deleting the newer registration out from under it."""
+    async def test_expect_ack_gives_each_caller_its_own_event(self, dispatcher):
+        """Two registrations for one CRC must not be coalesced onto a shared
+        Event. Sharing is what let one waiter's identity-guarded cleanup delete
+        the other's registration: the guard passed because the object really
+        was the same one (issue #136)."""
         crc = 0xAABBCCDD
 
-        task = asyncio.create_task(dispatcher.wait_for_ack(crc, timeout=10))
-        await asyncio.sleep(0)  # let the task register
-        stale_event = dispatcher._waiting_acks[crc]
+        first = dispatcher.expect_ack(crc)
+        second = dispatcher.expect_ack(crc)
 
-        # Simulate a newer waiter taking over the same CRC slot.
-        newer_event = asyncio.Event()
-        dispatcher._waiting_acks[crc] = newer_event
-        assert stale_event is not newer_event
+        assert first is not second
+        assert dispatcher._waiting_acks[crc] == [first, second]
 
-        task.cancel()
+    @pytest.mark.asyncio
+    async def test_register_ack_received_wakes_every_waiter_on_the_crc(self, dispatcher):
+        """One ACK resolves every send waiting on that CRC, not just one."""
+        crc = 0xAABBCCDD
+        first = dispatcher.expect_ack(crc)
+        second = dispatcher.expect_ack(crc)
+
+        await dispatcher._register_ack_received(crc)
+
+        assert first.is_set()
+        assert second.is_set()
+        assert crc not in dispatcher._waiting_acks
+
+    @pytest.mark.asyncio
+    async def test_cancelled_waiter_does_not_detach_a_co_waiter(self, dispatcher):
+        """A waiter's cleanup must remove only its own Event. Cancelling the
+        first of two waiters on one CRC must leave the second registered and
+        still able to be woken by the ACK it is waiting for."""
+        crc = 0xAABBCCDD
+
+        first = asyncio.create_task(dispatcher.wait_for_ack(crc, timeout=10))
+        second = asyncio.create_task(dispatcher.wait_for_ack(crc, timeout=10))
+        await asyncio.sleep(0)  # let both tasks register
+        assert len(dispatcher._waiting_acks[crc]) == 2
+
+        first.cancel()
         with pytest.raises(asyncio.CancelledError):
-            await task
+            await first
 
-        # The stale task's finally-block cleanup must not have clobbered
-        # the newer registration.
-        assert dispatcher._waiting_acks.get(crc) is newer_event
+        assert len(dispatcher._waiting_acks[crc]) == 1
+
+        await dispatcher._register_ack_received(crc)
+        assert await second is True
+        assert crc not in dispatcher._waiting_acks
+
+    @pytest.mark.asyncio
+    async def test_waiter_timing_out_does_not_detach_a_longer_one(self, dispatcher):
+        """Cancellation is not the only way to leave early. Whichever waiter's
+        own deadline fires first runs the same cleanup, and in the field that
+        is the likelier trigger: the first sender's ACK_TIMEOUT expiring while
+        a later send on the same CRC still has time left on its own."""
+        crc = 0xAABBCCDD
+
+        impatient = asyncio.create_task(dispatcher.wait_for_ack(crc, timeout=0.01))
+        patient = asyncio.create_task(dispatcher.wait_for_ack(crc, timeout=10))
+        await asyncio.sleep(0)  # let both tasks register
+        assert len(dispatcher._waiting_acks[crc]) == 2
+
+        assert await impatient is False  # its window closes first
+
+        assert len(dispatcher._waiting_acks[crc]) == 1
+
+        # An ACK arriving inside the second waiter's window still reaches it.
+        await dispatcher._register_ack_received(crc)
+        assert await patient is True
+        assert crc not in dispatcher._waiting_acks
 
     @pytest.mark.asyncio
     async def test_normal_ack_receipt_still_works_and_cleans_up_once(self, dispatcher):

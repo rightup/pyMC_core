@@ -265,8 +265,7 @@ async def test_direct_ack_is_still_peeked_in_transit():
     assert PAYLOAD_TYPE_ACK not in d._local_delivery_types
 
     crc = 0x12345678
-    evt = asyncio.Event()
-    d._waiting_acks[crc] = evt
+    evt = d.expect_ack(crc)
 
     ack = _direct_pkt(
         PAYLOAD_TYPE_ACK, bytes([OTHER_HASH, 0xBB]), hops=2, payload=crc.to_bytes(4, "little")
