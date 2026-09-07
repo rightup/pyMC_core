@@ -461,3 +461,108 @@ async def test_state_returns_to_idle_after_a_successful_ack_wait():
     assert await task is True
     assert d.state == DispatcherState.IDLE
     assert d._current_expected_crc is None
+
+
+# --------------------------------------------------------------------------- #
+# Waiter ownership when two sends collide on one CRC (issue #136)
+# --------------------------------------------------------------------------- #
+#
+# Releasing _tx_lock before the ACK wait (the fix these tests pin) is what lets
+# two sends wait on the same CRC at once. That is legitimate -- the CRC hashes
+# timestamp, flags and text with a key (PacketBuilder.create_text_message), so a
+# caller supplying its own timestamp reproduces it exactly, and a plain retry of
+# one packet does too. Each waiter must therefore own its registration: one
+# leaving, for any reason, must not detach the other.
+
+
+@pytest.mark.asyncio
+async def test_same_crc_sends_each_get_their_own_waiter():
+    d, radio = _make()
+    crc = 0x12345678
+
+    first = asyncio.create_task(d.send_packet(_txt(0), wait_for_ack=True, expected_crc=crc))
+    second = asyncio.create_task(d.send_packet(_txt(1), wait_for_ack=True, expected_crc=crc))
+    assert await _spin_until(lambda: radio.send_count == 2)
+
+    waiters = d._waiting_acks[crc]
+    assert len(waiters) == 2
+    assert waiters[0] is not waiters[1]  # not coalesced onto one shared Event
+
+    await d._register_ack_received(crc)
+    assert await first is True
+    assert await second is True
+
+
+@pytest.mark.asyncio
+async def test_cancelling_one_same_crc_send_leaves_the_other_waiting():
+    # Issue #136: cancelling one sender deleted the shared registration, so the
+    # ACK that arrived next was cached but woke nobody, and the surviving send
+    # reported a delivery failure it never had.
+    d, radio = _make()
+    crc = 0x12345678
+
+    first = asyncio.create_task(d.send_packet(_txt(0), wait_for_ack=True, expected_crc=crc))
+    second = asyncio.create_task(d.send_packet(_txt(1), wait_for_ack=True, expected_crc=crc))
+    assert await _spin_until(lambda: radio.send_count == 2)
+
+    first.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await first
+
+    # Only the cancelled sender's own registration is gone.
+    assert len(d._waiting_acks[crc]) == 1
+
+    await d._register_ack_received(crc)
+    assert await second is True
+    assert d._waiting_acks == {}
+
+
+@pytest.mark.asyncio
+async def test_cancel_during_tx_delay_spares_a_co_waiter():
+    # The send_packet finally-block owns cleanup for a cancel landing in the
+    # tx_delay gap, before _await_ack_event's own try/finally is entered
+    # (test_cancel_during_tx_delay_does_not_strand_the_waiter). That earlier
+    # cleanup path must be waiter-scoped too, not just the later one.
+    d, radio = _make(tx_delay=0.5)
+    crc = 0x0BADF00D
+
+    first = asyncio.create_task(d.send_packet(_txt(0), wait_for_ack=True, expected_crc=crc))
+    assert await _spin_until(lambda: crc in d._waiting_acks)
+    second = asyncio.create_task(d.send_packet(_txt(1), wait_for_ack=True, expected_crc=crc))
+    assert await _spin_until(lambda: len(d._waiting_acks.get(crc, [])) == 2)
+
+    first.cancel()  # still parked in tx_delay, not yet inside _await_ack_event
+    with pytest.raises(asyncio.CancelledError):
+        await first
+
+    assert len(d._waiting_acks[crc]) == 1
+
+    await d._register_ack_received(crc)
+    assert await second is True
+    assert d._waiting_acks == {}
+
+
+@pytest.mark.asyncio
+async def test_crc_stays_registered_until_the_last_waiter_leaves():
+    # AckHandler decides do-not-retransmit with `crc in _waiting_acks`
+    # (firmware BaseChatMesh::onAckRecv). One waiter leaving must not clear that
+    # while another send is still in flight, and the last one leaving must clear
+    # it -- an empty list left behind would read as a waiter that is still there
+    # and mark every relayed ACK for that CRC for the life of the process.
+    d, radio = _make()
+    crc = 0x0BADF00D
+
+    first = asyncio.create_task(d.send_packet(_txt(0), wait_for_ack=True, expected_crc=crc))
+    second = asyncio.create_task(d.send_packet(_txt(1), wait_for_ack=True, expected_crc=crc))
+    assert await _spin_until(lambda: radio.send_count == 2)
+
+    first.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await first
+    assert crc in d._waiting_acks  # second is still waiting on it
+
+    second.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await second
+    assert crc not in d._waiting_acks
+    assert d._waiting_acks == {}

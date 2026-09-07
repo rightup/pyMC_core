@@ -189,7 +189,9 @@ class Dispatcher:
         self._logger = logging.getLogger("Dispatcher")
         self._current_expected_crc: Optional[int] = None
         self._recent_acks: dict[int, float] = {}  # {crc: timestamp}
-        self._waiting_acks = {}
+        # {crc: [event per waiter]} -- see expect_ack for why waiters are not
+        # coalesced onto one shared Event.
+        self._waiting_acks: dict[int, list[asyncio.Event]] = {}
         self.dedupe_enabled = dedupe_enabled
 
         # Simple TX lock to prevent concurrent transmissions
@@ -1093,10 +1095,10 @@ class Dispatcher:
             # is the one that spans every exit path. Without this, a cancel during
             # the tx_delay pause would strand the CRC in _waiting_acks forever
             # (nothing prunes it, unlike _recent_acks), leaving relayed ACKs for
-            # that CRC permanently marked do-not-retransmit. Identity-guarded and
-            # idempotent: a no-op once the ACK path or _await_ack_event removed it.
-            if self._waiting_acks.get(ack_crc) is ack_event:
-                del self._waiting_acks[ack_crc]
+            # that CRC permanently marked do-not-retransmit. Scoped to our own
+            # Event and idempotent: a no-op once the ACK path or
+            # _await_ack_event removed it, and never another waiter's entry.
+            self._discard_ack_waiter(ack_crc, ack_event)
 
     def _resolve_tx_radio_id_for_log(
         self, raw: bytes, radio_id: Optional[str] = None
@@ -1257,12 +1259,11 @@ class Dispatcher:
             return False
         finally:
             # Clean up our registration on every exit path (normal return,
-            # timeout, or cancellation) so `_waiting_acks` never leaks.
-            # Identity-guarded: if the receive path already popped our entry
-            # (the normal-ACK case) this is a no-op; if a *different* waiter
-            # has since registered under the same CRC, don't delete theirs.
-            if self._waiting_acks.get(crc) is event:
-                del self._waiting_acks[crc]
+            # timeout, or cancellation) so `_waiting_acks` never leaks. Scoped
+            # to our own Event: if the receive path already popped the CRC (the
+            # normal-ACK case) this is a no-op, and a concurrent waiter on the
+            # same CRC keeps its registration.
+            self._discard_ack_waiter(crc, event)
 
     # ------------------------------------------------------------------#
     # ACK tracking and management
@@ -1271,16 +1272,46 @@ class Dispatcher:
         """
         Register an ACK CRC we're waiting for and return an asyncio.Event
         that will be set as soon as the ACK arrives (or is already cached).
-        """
-        evt = self._waiting_acks.get(crc)
-        if evt is None:
-            evt = asyncio.Event()
-            self._waiting_acks[crc] = evt
 
-            # ACK might already be in the recent-ACK cache -> fire instantly
+        Every call gets its *own* Event, appended to this CRC's waiter list,
+        even when a waiter is already registered for the same CRC. Two sends
+        can legitimately collide on one CRC -- it hashes the timestamp, flags
+        and text with a key (PacketBuilder.create_text_message), so a caller
+        that supplies its own ``timestamp`` can reproduce it exactly -- and
+        their waits overlap because the ACK wait runs off ``_tx_lock``.
+
+        Handing both waiters one shared Event made whichever left first delete
+        the registration the other was still relying on: its cleanup checked
+        identity, but the object *was* identical, so the guard passed. The
+        second sender then never saw its ACK and reported a false delivery
+        failure. Per-waiter events make that identity check mean what it says.
+        """
+        evt = asyncio.Event()
+        self._waiting_acks.setdefault(crc, []).append(evt)
+
+        # ACK might already be in the recent-ACK cache -> fire instantly
         if crc in self._recent_acks:
             evt.set()
         return evt
+
+    def _discard_ack_waiter(self, crc: int, event: asyncio.Event) -> None:
+        """Remove one waiter's registration; drop the CRC with the last waiter.
+
+        Identity-scoped, so a co-waiter on the same CRC keeps its own entry.
+        The key has to disappear once the list empties: AckHandler decides
+        do-not-retransmit with ``crc in _waiting_acks`` (firmware
+        BaseChatMesh::onAckRecv), and a leftover empty list would read as a
+        waiter that is still there.
+        """
+        waiters = self._waiting_acks.get(crc)
+        if waiters is None:
+            return
+        for index, waiter in enumerate(waiters):
+            if waiter is event:
+                del waiters[index]
+                break
+        if not waiters:
+            del self._waiting_acks[crc]
 
     # RX path for every incoming packet
     async def _dispatch(self, pkt: Packet) -> None:
@@ -1379,10 +1410,12 @@ class Dispatcher:
         ts = asyncio.get_running_loop().time()
         self._recent_acks[crc] = ts
 
-        # Notify waiting sender if this CRC matches
-        if evt := self._waiting_acks.pop(crc, None):
+        # Notify every waiting sender on this CRC -- concurrent sends can
+        # share one, and each holds its own Event.
+        if waiters := self._waiting_acks.pop(crc, None):
             self._log(f"ACK matched! CRC {crc:08X}")
-            evt.set()
+            for evt in waiters:
+                evt.set()
 
         if self._ack_received_listener:
             return bool(await self._invoke_ack_listener(crc))

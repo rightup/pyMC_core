@@ -1,4 +1,3 @@
-import asyncio
 from types import SimpleNamespace
 
 import pytest
@@ -305,8 +304,7 @@ async def test_path_handler_updates_matched_contact_sends_reciprocal_and_resolve
     dispatcher = Dispatcher(_CallbackRadio())
     dispatcher.local_identity = LOCAL_IDENTITY
     dispatcher.set_contact_book(contacts)
-    waiting = asyncio.Event()
-    dispatcher._waiting_acks[ack_crc] = waiting
+    waiting = dispatcher.expect_ack(ack_crc)
 
     ack_handler = AckHandler(lambda _message: None, dispatcher)
     ack_handler.set_ack_received_callback(dispatcher._register_ack_received)
