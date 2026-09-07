@@ -623,7 +623,7 @@ class _SendOpsMixin:
             logger.error("Error sending raw data direct: %s", e)
             return SentResult(success=False)
 
-    async def send_raw_packet(self, priority: int, packet_bytes: bytes) -> bool:
+    async def send_raw_packet(self, priority: int, packet_bytes: bytes) -> SentResult:
         """Inject a fully-formed on-air packet for transmission (CMD_SEND_RAW_PACKET).
 
         Mirrors firmware ``MyMesh.cpp`` ``CMD_SEND_RAW_PACKET``: parse the raw
@@ -637,28 +637,28 @@ class _SendOpsMixin:
         currently ignored: the bridge's low-level send path
         (:meth:`_send_packet`) does not expose a prioritized TX queue.
 
-        Returns True if the packet parsed and was handed off for transmission,
-        False on parse failure or send error (the frame_server handler maps
-        False to ``ERR_CODE_TABLE_FULL``).
+        Returns a :class:`SentResult`. Parse failure is ``error="illegal_arg"``
+        (firmware ``releasePacket`` + ``ERR_CODE_ILLEGAL_ARG``); TX/queue full
+        is ``error="send_failed"`` (firmware ``ERR_CODE_TABLE_FULL``).
         """
         try:
             pkt = Packet()
             if not pkt.read_from(bytes(packet_bytes)):
-                return False
+                return SentResult(success=False, error="illegal_arg")
         except Exception as e:
             logger.warning("send_raw_packet: failed to parse packet: %s", e)
-            return False
+            return SentResult(success=False, error="illegal_arg")
         try:
             success = await self._send_packet(pkt, wait_for_ack=False)
             if success:
                 self.stats.record_tx(is_flood=False)
-            else:
-                self.stats.record_tx_error()
-            return success
+                return SentResult(success=True)
+            self.stats.record_tx_error()
+            return SentResult(success=False, error="send_failed")
         except Exception as e:
             logger.error("Error sending raw packet: %s", e)
             self.stats.record_tx_error()
-            return False
+            return SentResult(success=False, error="send_failed")
 
     async def send_trace_path(
         self,
@@ -783,7 +783,7 @@ class _SendOpsMixin:
         """Send the first packet and return its metadata plus a waiter task."""
         deadline = time.monotonic() + total_timeout_s if total_timeout_s is not None else None
         try:
-            pkt, packet_tag = build_packet()
+            pkt, packet_tag = self._take_built_packet(build_packet)
             if response_tag_registered is not None and packet_tag is not None:
                 response_tag_registered(packet_tag)
             self._apply_flood_scope(pkt)
@@ -1219,7 +1219,7 @@ class _SendOpsMixin:
         deadline = time.monotonic() + total_timeout_s if total_timeout_s else None
         for attempt in range(DEFAULT_MAX_ATTEMPTS):
             if attempt == 0:
-                pkt, packet_tag = build_packet()
+                pkt, packet_tag = self._take_built_packet(build_packet)
             else:
                 pkt, packet_tag = self._build_retry_packet(build_packet, proxy, log_label)
             if response_tag_registered is not None and packet_tag is not None:
@@ -1246,6 +1246,48 @@ class _SendOpsMixin:
             if not result.get("timeout"):
                 break
         return result
+
+    @staticmethod
+    def _take_built_packet(
+        build_packet: Callable[[], tuple[Packet, Optional[int]]],
+    ) -> tuple[Packet, Optional[int]]:
+        """Invoke a request builder and hold it to its freshness contract.
+
+        Every send path here scopes the packet it has just built, and both
+        resolvers -- ``CompanionBase._apply_flood_scope`` and
+        ``Dispatcher._apply_flood_scope`` -- skip a packet that already carries a
+        decision. That skip is deliberate: it is what lets a reply keep the
+        region ``apply_reply_scope`` chose for it, and what lets a bridge's own
+        region survive its host repeater's resolver.
+
+        The cost is that the mark makes a *reused* packet indistinguishable from
+        a decided one. A builder that returned a cached packet rather than a new
+        one would hand its second caller a packet already marked by the first
+        attempt, and the retry would go out plain -- stranded at hop 0 on
+        precisely the scoped meshes that made the first attempt fail. Nothing
+        downstream can tell that apart from a legitimate decision, so it is
+        caught here, where the builder's contract lives.
+
+        ``_path_hash_mode_applied`` is checked for the same reason: it also
+        suppresses the dispatcher, and ``Packet.read_from`` clears both together
+        as one frame's worth of decisions.
+
+        Every builder in this module constructs through ``PacketBuilder``, so
+        this can only be tripped by a future edit to this file -- a programming
+        error, never radio traffic or application input, which is why it raises
+        rather than degrading the send.
+        """
+        pkt, tag = build_packet()
+        if pkt is not None and (
+            getattr(pkt, "_flood_scope_applied", False)
+            or getattr(pkt, "_path_hash_mode_applied", False)
+        ):
+            raise ValueError(
+                "request builder returned a packet that already carries send-time "
+                "decisions; build_packet must construct a new Packet per call, or "
+                "the retry it feeds will skip scoping and go out plain"
+            )
+        return pkt, tag
 
     def _build_retry_packet(
         self,
@@ -1293,14 +1335,14 @@ class _SendOpsMixin:
         """
         saved = getattr(proxy, "out_path_len", None)
         if saved is None or saved < 0:
-            return build_packet()  # already floods; nothing to force
+            return self._take_built_packet(build_packet)  # already floods; nothing to force
         try:
             proxy.out_path_len = -1
         except Exception as e:  # not a settable proxy: fall back to its own route
             logger.debug("[PATHDIAG] %s: cannot force flood retry: %s", log_label, e)
-            return build_packet()
+            return self._take_built_packet(build_packet)
         try:
-            pkt, tag = build_packet()
+            pkt, tag = self._take_built_packet(build_packet)
         finally:
             proxy.out_path_len = saved
         if pkt is not None and pkt.is_route_flood():
