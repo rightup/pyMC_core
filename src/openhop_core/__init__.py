@@ -3,7 +3,7 @@ openHop Core - A Python MeshCore library with SPI LoRa radio support
 Clean, simple API for building mesh network applications.
 """
 
-__version__ = "1.1.3.dev27"
+__version__ = "1.1.3.dev28"
 
 # Core mesh functionality
 from .node.node import MeshNode
