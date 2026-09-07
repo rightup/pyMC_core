@@ -755,7 +755,9 @@ class TestCommandResponses:
         assert result is not None
         assert result["airtime_ms"] == 42
         assert to_thread_mock.await_count == 2
-        to_thread_mock.assert_any_await(modem.send_frame_and_wait, b"payload", RESPONSE_TIMEOUT)
+        to_thread_mock.assert_any_await(
+            modem.send_frame_and_wait, b"payload", RESPONSE_TIMEOUT, verdict=[]
+        )
         to_thread_mock.assert_any_await(modem.get_airtime, len(b"payload"), 1.0)
 
 
@@ -2117,9 +2119,12 @@ class TestSerialRecovery:
 
         modem.configure_radio = MagicMock(side_effect=transient_configure_failure)
 
-        with patch(
-            "openhop_core.hardware.kiss_modem_wrapper.time.sleep", return_value=None
-        ) as sleep_mock, patch("threading.Event.wait", return_value=None):
+        with (
+            patch(
+                "openhop_core.hardware.kiss_modem_wrapper.time.sleep", return_value=None
+            ) as sleep_mock,
+            patch("threading.Event.wait", return_value=None),
+        ):
             assert modem.connect() is True
 
         assert modem.configure_radio.call_count == 2
@@ -2140,8 +2145,9 @@ class TestSerialRecovery:
         modem._set_kiss_tx_delay = MagicMock()
         modem.configure_radio = MagicMock(return_value=False)
 
-        with patch("openhop_core.hardware.kiss_modem_wrapper.time.sleep", return_value=None), patch(
-            "threading.Event.wait", return_value=None
+        with (
+            patch("openhop_core.hardware.kiss_modem_wrapper.time.sleep", return_value=None),
+            patch("threading.Event.wait", return_value=None),
         ):
             assert modem.connect() is False
 
@@ -2199,7 +2205,7 @@ class TestSerialRecovery:
 
 
 class TestKissDataTxSingleFlight:
-    """DATA transmits are single-flight and fail fast on TX_BUSY / link loss."""
+    """DATA transmits are single-flight; only TX_DONE decides the outcome."""
 
     def test_send_frame_and_wait_is_single_flight(self):
         """A second DATA frame must not be written while the first is in flight."""
@@ -2249,17 +2255,20 @@ class TestKissDataTxSingleFlight:
         assert results.get("b") is True
         assert order == ["A", "B"]
 
-    def test_tx_busy_wakes_sender_and_is_not_queued(self):
-        """A 0x07 (TX_BUSY) error fails the sender fast and is not mis-routed to the
-        SetHardware response path."""
+    def test_tx_busy_does_not_fail_a_transmit_the_modem_confirms(self):
+        """A TX_DONE arriving behind a TX_BUSY still confirms the send.
+
+        Firmware emits the same 0x07 when its 2-slot host-output queue overflows -- a
+        receive-side condition. Failing the send on it reported failure for frames that
+        went out fine whenever inbound traffic backed the modem up.
+        """
         modem = KissModemWrapper(port="/dev/null", auto_configure=False)
         modem.is_connected = True
 
         sent = threading.Event()
-        modem.send_frame = lambda data: (sent.set() or True)
+        modem.send_frame = lambda data: sent.set() or True
 
         result: dict[str, object] = {}
-        start = time.monotonic()
         t = threading.Thread(
             target=lambda: result.__setitem__("r", modem.send_frame_and_wait(b"AA", timeout=5.0))
         )
@@ -2270,10 +2279,64 @@ class TestKissDataTxSingleFlight:
         for byte in err:
             modem._decode_kiss_byte(byte)
 
+        time.sleep(0.15)  # outlast a poll slice: TX_BUSY must not end the wait
+        assert not result
+
+        tx_done = bytes([KISS_FEND, KISS_CMD_SETHARDWARE, RESP_TX_DONE, 0x01, KISS_FEND])
+        for byte in tx_done:
+            modem._decode_kiss_byte(byte)
+
+        t.join(timeout=1.0)
+        assert result.get("r") is True
+        assert modem.stats["tx_busy"] == 1  # counted, so backpressure stays visible
+        assert len(modem._response_queue) == 0  # not consumed by the SetHardware waiter
+
+    def test_tx_busy_without_tx_done_leaves_the_send_unconfirmed(self):
+        """With no TX_DONE behind it, TX_BUSY still fails the send -- and says why."""
+        modem = KissModemWrapper(port="/dev/null", auto_configure=False)
+        modem.is_connected = True
+
+        sent = threading.Event()
+        modem.send_frame = lambda data: sent.set() or True
+
+        result: dict[str, object] = {}
+        t = threading.Thread(
+            target=lambda: result.__setitem__("r", modem.send_frame_and_wait(b"AA", timeout=0.2))
+        )
+        t.start()
+        assert sent.wait(timeout=1.0)
+
+        err = bytes([KISS_FEND, KISS_CMD_SETHARDWARE, RESP_ERROR, HW_ERR_TX_BUSY, KISS_FEND])
+        for byte in err:
+            modem._decode_kiss_byte(byte)
+
+        t.join(timeout=5.0)
+        assert result.get("r") is False
+        assert "TX_BUSY" in (modem._tx_last_verdict or "")
+        assert len(modem._response_queue) == 0
+
+    def test_tx_done_failure_status_is_reported_as_the_modems_verdict(self):
+        """A TX_DONE carrying 0x00 fails the send, named as the modem's own status."""
+        modem = KissModemWrapper(port="/dev/null", auto_configure=False)
+        modem.is_connected = True
+
+        sent = threading.Event()
+        modem.send_frame = lambda data: sent.set() or True
+
+        result: dict[str, object] = {}
+        t = threading.Thread(
+            target=lambda: result.__setitem__("r", modem.send_frame_and_wait(b"AA", timeout=5.0))
+        )
+        t.start()
+        assert sent.wait(timeout=1.0)
+
+        tx_fail = bytes([KISS_FEND, KISS_CMD_SETHARDWARE, RESP_TX_DONE, 0x00, KISS_FEND])
+        for byte in tx_fail:
+            modem._decode_kiss_byte(byte)
+
         t.join(timeout=1.0)
         assert result.get("r") is False
-        assert time.monotonic() - start < 2.0  # failed fast, not via the 5s timeout
-        assert len(modem._response_queue) == 0  # not consumed by the SetHardware waiter
+        assert "status=0x00" in (modem._tx_last_verdict or "")
 
     def test_serial_failure_wakes_in_flight_sender(self):
         """A serial failure mid-transmit wakes the waiter instead of stalling."""
@@ -2282,7 +2345,7 @@ class TestKissDataTxSingleFlight:
         modem._start_reconnect_worker = MagicMock()  # don't spawn a reconnect thread
 
         sent = threading.Event()
-        modem.send_frame = lambda data: (sent.set() or True)
+        modem.send_frame = lambda data: sent.set() or True
 
         result: dict[str, object] = {}
         start = time.monotonic()
@@ -2533,9 +2596,10 @@ class TestReconnectRequiresLiveReader:
             modem.rx_thread.join(timeout=2.0)
             return True
 
-        with patch(
-            "openhop_core.hardware.kiss_modem_wrapper.serial.Serial", return_value=fake
-        ), patch.object(modem, "_wait_for_modem_ready", side_effect=_ready):
+        with (
+            patch("openhop_core.hardware.kiss_modem_wrapper.serial.Serial", return_value=fake),
+            patch.object(modem, "_wait_for_modem_ready", side_effect=_ready),
+        ):
             assert modem._open_serial_and_start_threads() is False
 
     def test_open_reports_success_when_the_reader_survives(self):
@@ -2557,9 +2621,10 @@ class TestReconnectRequiresLiveReader:
 
         fake = QuietSerial()
         try:
-            with patch(
-                "openhop_core.hardware.kiss_modem_wrapper.serial.Serial", return_value=fake
-            ), patch.object(modem, "_wait_for_modem_ready", return_value=True):
+            with (
+                patch("openhop_core.hardware.kiss_modem_wrapper.serial.Serial", return_value=fake),
+                patch.object(modem, "_wait_for_modem_ready", return_value=True),
+            ):
                 assert modem._open_serial_and_start_threads() is True
                 assert modem.rx_thread.is_alive()
         finally:
@@ -2663,16 +2728,12 @@ class TestSerialPortOpen:
         """Run connect() against a fake pyserial, return the Serial() kwargs."""
         modem = KissModemWrapper(port="/dev/null", auto_configure=False)
         modem._post_connect_settle_s = 0
-        with patch(
-            "openhop_core.hardware.kiss_modem_wrapper.serial"
-        ) as fake_serial, patch.object(
-            kiss_modem_wrapper.threading, "Thread"
-        ), patch.object(
-            KissModemWrapper, "_wait_for_modem_ready", return_value=True
-        ), patch.object(
-            KissModemWrapper, "_query_modem_info"
-        ), patch.object(
-            KissModemWrapper, "_set_kiss_tx_delay"
+        with (
+            patch("openhop_core.hardware.kiss_modem_wrapper.serial") as fake_serial,
+            patch.object(kiss_modem_wrapper.threading, "Thread"),
+            patch.object(KissModemWrapper, "_wait_for_modem_ready", return_value=True),
+            patch.object(KissModemWrapper, "_query_modem_info"),
+            patch.object(KissModemWrapper, "_set_kiss_tx_delay"),
         ):
             modem.connect()
         assert fake_serial.Serial.call_count == 1
@@ -2685,3 +2746,201 @@ class TestSerialPortOpen:
     def test_connect_does_not_enable_hardware_flow_control(self):
         """The firmware implements no RTS/CTS flow control on the RX pipe."""
         assert self._connect_with_fake_serial().get("rtscts") is False
+
+
+class TestKissPortRecovery:
+    """Reconnect follows a renamed node, and says when a port is not coming back."""
+
+    def test_reconnect_follows_a_renamed_node(self):
+        """A device that re-enumerates under a new name is still reconnected to.
+
+        macOS renamed this very modem from cu.usbmodem1101 to cu.usbmodem12301
+        across a replug; pinned to the old path, the loop would retry forever.
+        """
+        modem = KissModemWrapper(port="/dev/old-node", auto_configure=False)
+        modem._stop_io_threads = MagicMock()
+        modem._alternate_port_paths = lambda: ["/dev/new-node"]
+        # Only the new path opens; the configured one is gone.
+        modem._open_serial_and_start_threads = lambda: modem.port == "/dev/new-node"
+        modem._run_post_connect_handshake = MagicMock(return_value=True)
+
+        with patch.object(kiss_modem_wrapper.time, "sleep", return_value=None):
+            modem._reconnect_loop()
+
+        assert modem.port == "/dev/new-node"
+        assert modem.is_connected is True
+        assert modem._degraded is False
+
+    def test_reconnect_keeps_the_configured_path_when_nothing_opens(self):
+        """A failed sweep must not leave the wrapper pointed at a candidate."""
+        modem = KissModemWrapper(port="/dev/old-node", auto_configure=False)
+        modem._stop_io_threads = MagicMock()
+        modem._alternate_port_paths = lambda: ["/dev/new-node"]
+        modem._open_serial_and_start_threads = lambda: False
+        modem._reconnect_max_attempts = 2
+
+        with patch.object(kiss_modem_wrapper.time, "sleep", return_value=None):
+            modem._reconnect_loop()
+
+        assert modem.port == "/dev/old-node"
+        assert modem.is_connected is False
+
+    def test_alternate_paths_match_on_usb_identity(self):
+        """Only a port with the same vid/pid/serial is a candidate."""
+        modem = KissModemWrapper(port="/dev/old-node", auto_configure=False)
+        modem._port_identity_ref = (0x10C4, 0xEA60, "0001")
+
+        same = MagicMock(device="/dev/new-node", vid=0x10C4, pid=0xEA60, serial_number="0001")
+        other = MagicMock(device="/dev/other-radio", vid=0x239A, pid=0x8029, serial_number="ZZ")
+        fake_list_ports = MagicMock(comports=MagicMock(return_value=[same, other]))
+        with (
+            patch.dict("sys.modules", {"serial.tools.list_ports": fake_list_ports}),
+            patch("serial.tools.list_ports", fake_list_ports, create=True),
+        ):
+            assert modem._alternate_port_paths() == ["/dev/new-node"]
+
+    def test_alternate_paths_needs_a_known_identity(self):
+        """With no recorded identity, never adopt some other serial port."""
+        modem = KissModemWrapper(port="/dev/old-node", auto_configure=False)
+        assert modem._port_identity_ref is None
+        assert modem._alternate_port_paths() == []
+
+    def test_repeated_identical_open_failure_escalates_once(self, caplog):
+        """The same errno every attempt gets one actionable line, not one per retry."""
+        modem = KissModemWrapper(port="/dev/null", auto_configure=False)
+        err = OSError(22, "Invalid argument")
+
+        with caplog.at_level("ERROR"):
+            for _ in range(modem._WEDGED_PORT_FAILURES + 3):
+                modem._note_open_failure(err)
+
+        wedged = [r for r in caplog.records if "failed to open" in r.getMessage()]
+        assert len(wedged) == 1  # escalated once, then rate-limited
+        assert "wedged" in wedged[0].getMessage()  # /dev/null exists, so: not a rename
+        assert modem._degraded_reason is not None
+        assert "Invalid argument" in modem._degraded_reason
+
+    def test_a_different_error_restarts_the_count(self):
+        """A changing failure is still churn, not a stuck port."""
+        modem = KissModemWrapper(port="/dev/null", auto_configure=False)
+        modem._note_open_failure(OSError(22, "Invalid argument"))
+        modem._note_open_failure(OSError(22, "Invalid argument"))
+        assert modem._open_failure_count == 2
+        modem._note_open_failure(OSError(2, "No such file or directory"))
+        assert modem._open_failure_count == 1
+
+
+def _port_info(device, vid=0x10C4, pid=0xEA60, serial_number="0001"):
+    """Stand-in for a pyserial ListPortInfo entry."""
+    return MagicMock(device=device, vid=vid, pid=pid, serial_number=serial_number)
+
+
+class TestKissPortIdentityEdges:
+    """Identity matching must not guess, and must cope with aliased device paths."""
+
+    def test_serial_less_twins_are_not_guessed_between(self):
+        """Two of the same model with no serial number: any pick would be a coin toss."""
+        modem = KissModemWrapper(port="/dev/old-node", auto_configure=False)
+        modem._port_identity_ref = (0x10C4, 0xEA60, None)
+
+        ports = [
+            _port_info("/dev/twin-a", serial_number=None),
+            _port_info("/dev/twin-b", serial_number=None),
+        ]
+        with patch("serial.tools.list_ports.comports", return_value=ports):
+            assert modem._alternate_port_paths() == []
+
+    def test_a_lone_serial_less_candidate_is_still_followed(self):
+        """The no-serial guard must not disable recovery when there is no ambiguity."""
+        modem = KissModemWrapper(port="/dev/old-node", auto_configure=False)
+        modem._port_identity_ref = (0x10C4, 0xEA60, None)
+
+        ports = [_port_info("/dev/new-node", serial_number=None)]
+        with patch("serial.tools.list_ports.comports", return_value=ports):
+            assert modem._alternate_port_paths() == ["/dev/new-node"]
+
+    def test_identity_is_learned_through_an_aliased_path(self, tmp_path):
+        """A by-id symlink never appears verbatim in comports(); resolve it."""
+        alias = tmp_path / "openhop-modem"
+        alias.symlink_to("/dev/null")
+        modem = KissModemWrapper(port=str(alias), auto_configure=False)
+
+        with patch("serial.tools.list_ports.comports", return_value=[_port_info("/dev/null")]):
+            modem._remember_port_identity()
+
+        assert modem._port_identity_ref == (0x10C4, 0xEA60, "0001")
+
+    def test_an_alias_is_not_offered_as_its_own_alternate(self, tmp_path):
+        """The configured alias and its target are one device, not two."""
+        alias = tmp_path / "openhop-modem"
+        alias.symlink_to("/dev/null")
+        modem = KissModemWrapper(port=str(alias), auto_configure=False)
+        modem._port_identity_ref = (0x10C4, 0xEA60, "0001")
+
+        with patch("serial.tools.list_ports.comports", return_value=[_port_info("/dev/null")]):
+            assert modem._alternate_port_paths() == []
+
+    def test_a_different_radio_on_a_matching_path_is_refused(self):
+        """Same make and model is not the same radio; the modem's own key decides."""
+        modem = KissModemWrapper(port="/dev/old-node", auto_configure=False)
+        modem._stop_io_threads = MagicMock()
+        modem._alternate_port_paths = lambda: ["/dev/new-node"]
+        modem._open_serial_and_start_threads = lambda: modem.port == "/dev/new-node"
+        modem._modem_identity_ref = b"\x01" * 32
+        modem._reconnect_max_attempts = 1
+
+        def handshake():
+            modem.modem_identity = b"\x02" * 32  # somebody else's modem
+            return True
+
+        modem._run_post_connect_handshake = handshake
+        modem._close_serial_connection = MagicMock()
+
+        with patch.object(kiss_modem_wrapper.time, "sleep", return_value=None):
+            modem._reconnect_loop()
+
+        assert modem.is_connected is False
+        assert modem.port == "/dev/old-node"  # not adopted
+
+    def test_wedged_port_escalates_within_a_minute_of_boot(self, caplog):
+        """A low monotonic clock must not swallow the first escalation."""
+        modem = KissModemWrapper(port="/dev/null", auto_configure=False)
+        err = OSError(22, "Invalid argument")
+
+        with patch.object(kiss_modem_wrapper.time, "monotonic", return_value=5.0):
+            with caplog.at_level("ERROR"):
+                for _ in range(modem._WEDGED_PORT_FAILURES):
+                    modem._note_open_failure(err)
+
+        assert any("failed to open" in r.getMessage() for r in caplog.records)
+
+
+class TestKissSendVerdictOwnership:
+    """A send's failure reason must belong to that send, not to whoever ran last."""
+
+    def test_verdict_sink_carries_this_calls_reason(self):
+        modem = KissModemWrapper(port="/dev/null", auto_configure=False)
+        modem.is_connected = True
+        modem.send_frame = lambda data: True
+
+        sink: list = []
+        assert modem.send_frame_and_wait(b"AA", timeout=0.2, verdict=sink) is False
+        assert sink and "no TX_DONE" in sink[0]
+
+    @pytest.mark.asyncio
+    async def test_send_raises_with_its_own_reason_not_the_shared_field(self):
+        """The shared field can be replaced by a concurrent send; the sink cannot."""
+        modem = KissModemWrapper(port="/dev/null", auto_configure=False)
+        modem.is_connected = True
+        modem.lbt_enabled = False
+
+        def fake_send(data, timeout=None, *, verdict=None):
+            if verdict is not None:
+                verdict.append("mine: TX_DONE status=0x00")
+            modem._tx_last_verdict = "theirs: some other send"
+            return False
+
+        modem.send_frame_and_wait = fake_send
+
+        with pytest.raises(Exception, match="mine: TX_DONE status=0x00"):
+            await modem.send(b"\x01\x02\x03\x04")

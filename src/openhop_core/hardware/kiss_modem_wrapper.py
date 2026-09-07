@@ -11,6 +11,7 @@ Protocol spec (frame format, SetHardware sub-commands, Data + RxMeta ordering):
 import asyncio
 import inspect
 import logging
+import os
 import random
 import struct
 import threading
@@ -184,7 +185,13 @@ HW_ERR_NO_CALLBACK = 0x03
 HW_ERR_MAC_FAILED = 0x04
 HW_ERR_UNKNOWN_CMD = 0x05
 HW_ERR_ENCRYPT_FAILED = 0x06
-# Emitted only on the DATA path when a transmit is already pending (single-slot modem TX).
+# Two unrelated conditions share this code. The modem emits it on the DATA path when a
+# transmit is already pending (single-slot modem TX), and -- since firmware moved its
+# host-bound writes to a 2-slot queue -- whenever that queue overflows, which is a
+# receive-side condition with no bearing on our transmit (kiss_modem_protocol.md:
+# "Radio TX busy, or host output queue full"). The two are indistinguishable on the wire,
+# so TX_BUSY is never a verdict on the in-flight frame; only TX_DONE is, and firmware
+# retains a TX_DONE until it can be queued rather than dropping it.
 HW_ERR_TX_BUSY = 0x07
 
 ERR_INVALID_LENGTH = HW_ERR_INVALID_LENGTH
@@ -357,6 +364,16 @@ class KissModemWrapper(LoRaRadio):
             self.radio_config.get("reconnect_max_delay_seconds", 15.0)
         )
         self._reconnect_max_attempts = int(self.radio_config.get("reconnect_max_attempts", 0))
+        # USB identity (vid, pid, serial) of the configured port, learned on the first
+        # successful open so a re-enumeration under a new node name can be followed.
+        self._port_identity_ref: Optional[tuple] = None
+        # Public key of the modem last handshaked, so a port that merely shares a
+        # vid/pid is not mistaken for this radio.
+        self._modem_identity_ref: Optional[bytes] = None
+        # Consecutive open failures sharing one (path, errno), for the wedged-port line.
+        self._open_failure_key: Optional[tuple] = None
+        self._open_failure_count = 0
+        self._open_failure_log_ts: Optional[float] = None
         self._post_connect_settle_s = max(
             0.0,
             float(
@@ -413,6 +430,11 @@ class KissModemWrapper(LoRaRadio):
         self._tx_inflight_lock = threading.Lock()
         self._tx_done_event = threading.Event()
         self._tx_done_result: Optional[bool] = None
+        # TX_BUSY seen while the current frame was in flight. Recorded for the log line
+        # and stats only -- see HW_ERR_TX_BUSY for why it cannot decide the send.
+        self._tx_busy_seen = False
+        # Why the last DATA send returned False, for the caller's error message.
+        self._tx_last_verdict: Optional[str] = None
 
         # Pending RX data payloads (Data frame) awaiting their RxMeta frame.
         # Each entry is (payload, deadline_monotonic); a frame is dispatched with
@@ -430,6 +452,7 @@ class KissModemWrapper(LoRaRadio):
             "rx_packets": 0,
             "tx_packets": 0,
             "errors": 0,
+            "tx_busy": 0,
             "last_rssi": -999,
             "last_snr": -999.0,
             "noise_floor": None,
@@ -488,6 +511,7 @@ class KissModemWrapper(LoRaRadio):
             self._reconnecting_event.clear()
             self._degraded = False
             self._degraded_reason = None
+            self._remember_modem_identity()
             return True
 
     def disconnect(self):
@@ -557,11 +581,150 @@ class KissModemWrapper(LoRaRadio):
                 logger.warning("RX worker did not survive startup on %s", self.port)
                 return False
 
+            self._remember_port_identity()
+            self._open_failure_key = None
+            self._open_failure_count = 0
             return True
         except Exception as e:
-            logger.error("Failed to connect to %s: %s", self.port, e)
+            self._note_open_failure(e)
             self.is_connected = False
             return False
+
+    # Consecutive identical open failures before the port is called wedged, and how
+    # often that line may repeat afterwards.
+    _WEDGED_PORT_FAILURES = 5
+    _WEDGED_PORT_LOG_INTERVAL_S = 60.0
+
+    def _port_identity(self, device: str) -> Optional[tuple]:
+        """Return (vid, pid, serial_number) for *device*, or None if unavailable.
+
+        Matches on the resolved path, not the configured string: a port is often
+        given as an alias (/dev/serial/by-id/..., or a udev-named /dev/openhop-modem
+        -- the constructor already treats the former specially) which never appears
+        verbatim in comports(), and a literal comparison would leave exactly those
+        setups with no identity to recover by.
+        """
+        target = os.path.realpath(device)
+        try:
+            from serial.tools import list_ports
+
+            for info in list_ports.comports():
+                if info.device == device or os.path.realpath(info.device) == target:
+                    return (info.vid, info.pid, info.serial_number)
+        except Exception as e:
+            logger.debug("Could not enumerate serial ports: %s", e)
+        return None
+
+    def _remember_port_identity(self) -> None:
+        """Record the open port's USB identity, if the OS exposes one."""
+        identity = self._port_identity(self.port)
+        if identity is not None and identity[0] is not None:
+            self._port_identity_ref = identity
+
+    def _alternate_port_paths(self) -> list[str]:
+        """Device paths other than the configured one carrying the same USB identity.
+
+        Node names are not stable across a re-enumeration -- this very modem moved
+        from cu.usbmodem1101 to cu.usbmodem12301 across a replug -- so a reconnect
+        loop pinned to the configured path can retry a name that will never open
+        again. Matching on vid/pid/serial is what keeps this from adopting some
+        other radio that happens to be plugged in.
+        """
+        reference = self._port_identity_ref
+        if not reference:
+            return []
+        try:
+            from serial.tools import list_ports
+
+            ports = list_ports.comports()
+        except Exception as e:
+            logger.debug("Could not enumerate serial ports: %s", e)
+            return []
+        current = os.path.realpath(self.port)
+        candidates = [
+            info.device
+            for info in ports
+            if os.path.realpath(info.device) != current
+            and (info.vid, info.pid, info.serial_number) == reference
+        ]
+        if reference[2] is None and len(candidates) > 1:
+            # Same vendor, same model, no serial number to tell them apart: two of
+            # these plugged in at once makes any pick a coin toss, and adopting the
+            # wrong radio is worse than staying degraded until the node comes back.
+            logger.warning(
+                "%d ports share this modem's USB identity and none report a serial "
+                "number; not guessing which one is the modem",
+                len(candidates),
+            )
+            return []
+        return candidates
+
+    def _remember_modem_identity(self) -> None:
+        """Record the handshaked modem's public key as the identity to expect."""
+        if self.modem_identity is not None:
+            self._modem_identity_ref = bytes(self.modem_identity)
+
+    def _modem_identity_matches(self) -> bool:
+        """True when the modem just handshaked is the one we were talking to.
+
+        The USB identity only says "same make and model"; a CP2102's serial is
+        often a batch constant like "0001". This compares the radio's own public
+        key, which is what actually distinguishes two modems. Unknown on either
+        side (no handshake info) means there is nothing to contradict, so the USB
+        identity stands as the only filter.
+        """
+        expected = self._modem_identity_ref
+        actual = self.modem_identity
+        if expected is None or actual is None:
+            return True
+        return bytes(actual) == bytes(expected)
+
+    def _note_open_failure(self, exc: BaseException) -> None:
+        """Log an open failure, escalating once the port stops opening at all.
+
+        A port that answers with the same error on every attempt is not coming back
+        by itself. Whether the node is gone (a rename, which _alternate_port_paths
+        covers) or present but unconfigurable (a wedged USB bridge, which nothing
+        here can clear) the operator needs telling once -- not an identical line
+        every retry for the life of the process.
+        """
+        errno_val = getattr(exc, "errno", None)
+        if errno_val is None and exc.args and isinstance(exc.args[0], int):
+            errno_val = exc.args[0]  # termios.error carries (errno, message)
+        key = (self.port, errno_val)
+        if key == self._open_failure_key:
+            self._open_failure_count += 1
+        else:
+            self._open_failure_key = key
+            self._open_failure_count = 1
+            self._open_failure_log_ts = None
+        self._degraded_reason = f"cannot open {self.port}: {exc}"
+
+        if self._open_failure_count < self._WEDGED_PORT_FAILURES:
+            logger.error("Failed to connect to %s: %s", self.port, exc)
+            return
+        now = time.monotonic()
+        if (
+            self._open_failure_log_ts is not None
+            and now - self._open_failure_log_ts < self._WEDGED_PORT_LOG_INTERVAL_S
+        ):
+            return
+        self._open_failure_log_ts = now
+        if os.path.exists(self.port):
+            detail = (
+                "the device is still enumerated but will not configure, so its USB "
+                "bridge or driver is wedged and retrying cannot clear it"
+            )
+        else:
+            detail = "the device node is gone and no port with a matching USB identity was found"
+        logger.error(
+            "%s has failed to open %d times with the same error (%s): %s. "
+            "Reconnect the modem physically to recover.",
+            self.port,
+            self._open_failure_count,
+            exc,
+            detail,
+        )
 
     def _run_post_connect_handshake(self) -> bool:
         """Run modem setup steps after serial open."""
@@ -832,18 +995,46 @@ class KissModemWrapper(LoRaRadio):
                 if self.stop_event.is_set():
                     break
                 self.is_connected = False
-                self._stop_io_threads(join_timeout=0.5)
-                if not self._open_serial_and_start_threads():
-                    continue
-                if not self._run_post_connect_handshake():
-                    self._close_serial_connection()
-                    self.is_connected = False
-                    continue
-                self.is_connected = True
-                self._degraded = False
-                self._degraded_reason = None
-                logger.info("KISS modem serial reconnect successful on attempt %s", attempts)
-                return
+                configured_port = self.port
+                # The configured path first; then any node carrying the same USB
+                # identity, so a device that came back renamed is still found.
+                for candidate in [configured_port] + self._alternate_port_paths():
+                    self._stop_io_threads(join_timeout=0.5)
+                    self.port = candidate
+                    if not self._open_serial_and_start_threads():
+                        continue
+                    if not self._run_post_connect_handshake():
+                        self._close_serial_connection()
+                        self.is_connected = False
+                        continue
+                    if candidate != configured_port and not self._modem_identity_matches():
+                        # Same make and model, different radio: adopting it would
+                        # silently transmit this node's traffic from someone else's
+                        # modem. Leave it alone and keep looking.
+                        logger.warning(
+                            "%s shares the USB identity but reports modem %s, not %s; "
+                            "not adopting it",
+                            candidate,
+                            (self.modem_identity or b"").hex()[:16] or "unknown",
+                            (self._modem_identity_ref or b"").hex()[:16] or "unknown",
+                        )
+                        self._close_serial_connection()
+                        self.is_connected = False
+                        continue
+                    self.is_connected = True
+                    self._degraded = False
+                    self._degraded_reason = None
+                    self._remember_modem_identity()
+                    if candidate != configured_port:
+                        logger.warning(
+                            "KISS modem reappeared as %s (was %s, same USB identity); "
+                            "continuing on the new path",
+                            candidate,
+                            configured_port,
+                        )
+                    logger.info("KISS modem serial reconnect successful on attempt %s", attempts)
+                    return
+                self.port = configured_port
 
     def _set_kiss_tx_delay(self, delay_ms: int) -> None:
         """
@@ -1083,7 +1274,13 @@ class KissModemWrapper(LoRaRadio):
             logger.error(f"Failed to send frame: {e}")
             return False
 
-    def send_frame_and_wait(self, data: bytes, timeout: float = RESPONSE_TIMEOUT) -> bool:
+    def send_frame_and_wait(
+        self,
+        data: bytes,
+        timeout: float = RESPONSE_TIMEOUT,
+        *,
+        verdict: Optional[list] = None,
+    ) -> bool:
         """
         Send a data frame and wait for the modem's TX_DONE.
 
@@ -1098,15 +1295,44 @@ class KissModemWrapper(LoRaRadio):
                 the estimated airtime of long frames.
 
         Returns:
-            True if transmission completed (TX_DONE ok), False otherwise.
+            True only when the modem confirms the transmit with TX_DONE status 0x01.
+            On False, the reason is appended to *verdict* when one is supplied, and
+            also left in ``_tx_last_verdict``.
+
+        Args:
+            verdict: optional one-element sink for this call's failure reason.
+                ``_tx_last_verdict`` is shared: senders serialise only inside
+                ``_tx_inflight_lock``, so by the time a caller reads that field the
+                next send may already have replaced it. Pass a list to be given the
+                reason belonging to *this* call.
+        """
+        ok, reason = self._send_frame_and_wait_verdict(data, timeout)
+        if verdict is not None:
+            verdict.append(reason)
+        return ok
+
+    def _verdict(self, reason: str) -> tuple[bool, str]:
+        """Record *reason* as the latest failure and return it to this caller."""
+        self._tx_last_verdict = reason
+        return (False, reason)
+
+    def _send_frame_and_wait_verdict(
+        self, data: bytes, timeout: float = RESPONSE_TIMEOUT
+    ) -> tuple[bool, Optional[str]]:
+        """:meth:`send_frame_and_wait`, returning (ok, reason) to the calling send.
+
+        ``_tx_last_verdict`` is shared state: senders serialise only inside
+        ``_tx_inflight_lock``, so by the time a caller reads the field its send has
+        released the lock and the next one may already have cleared it. The reason
+        travels back with the result instead.
         """
         if self._shutting_down:
-            return False
+            return self._verdict("shutting down")
 
         # Don't enqueue DATA while the link is down/reconnecting (mirror _send_command).
         in_reconnect_thread = threading.current_thread() is self.reconnect_thread
         if (self._reconnecting_event.is_set() or self._degraded) and not in_reconnect_thread:
-            return False
+            return self._verdict("serial link down or reconnecting")
 
         # Extend the wait to cover real airtime; a high-SF flood advert can exceed the
         # flat command timeout, which would otherwise look like a spurious TX_DONE timeout.
@@ -1119,29 +1345,56 @@ class KissModemWrapper(LoRaRadio):
         with self._tx_inflight_lock:
             self._tx_done_event.clear()
             self._tx_done_result = None
+            self._tx_busy_seen = False
+            self._tx_last_verdict = None
 
             if not self.send_frame(data):
-                return False
+                return self._verdict("frame not written to the modem")
 
             # Poll in short slices so a shutdown or mid-flight link failure returns
-            # promptly instead of stalling the full timeout. TX_DONE (success/fail)
-            # and TX_BUSY both set the event; a link drop sets it via
-            # _mark_serial_failure / cleanup.
+            # promptly instead of stalling the full timeout. TX_DONE (success or
+            # failure) sets the event; a link drop sets it via _mark_serial_failure /
+            # cleanup, leaving the result None. TX_BUSY deliberately does not set it.
             deadline = time.monotonic() + effective_timeout
             while not self._shutting_down:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     break
                 if self._tx_done_event.wait(min(0.1, remaining)):
-                    return self._tx_done_result or False
+                    return self._resolve_tx_done()
                 if self._degraded or self.stop_event.is_set():
-                    return False
+                    logger.warning("DATA send unconfirmed: serial link lost mid-transmit")
+                    return self._verdict("serial link lost mid-transmit")
 
             if self._shutting_down:
-                return False
+                return self._verdict("shutting down")
 
-            logger.warning("TX_DONE timeout")
-            return False
+            if self._tx_busy_seen:
+                # Either the modem discarded this frame (a transmit was already
+                # pending) or its host-bound queue overflowed and the TX_DONE never
+                # got back to us. Both leave the transmit unconfirmed; neither proves
+                # the frame stayed off the air.
+                reason = "TX_BUSY and no TX_DONE (modem busy, or host output queue full)"
+            else:
+                reason = f"no TX_DONE within {effective_timeout:.1f}s"
+            logger.warning("DATA send unconfirmed: %s", reason)
+            return self._verdict(reason)
+
+    def _resolve_tx_done(self) -> tuple[bool, Optional[str]]:
+        """Turn a set ``_tx_done_event`` into (ok, reason), recording the reason."""
+        result = self._tx_done_result
+        if result is True:
+            return (True, None)
+        if result is False:
+            # The modem completed a transmit cycle and reported failure. Its TX_SENDING
+            # watchdog reports 0x00 when the radio's TX-done interrupt is missed, so the
+            # frame may well have gone out -- but only 0x01 confirms a clean send, and
+            # nothing else here can tell the two apart.
+            reason = "modem reported TX_DONE status=0x00"
+        else:
+            reason = "transmit aborted (link lost or shutting down)"
+        logger.warning("DATA send failed: %s", reason)
+        return self._verdict(reason)
 
     def _send_command(
         self, sub_cmd: int, data: bytes = b"", timeout: float = RESPONSE_TIMEOUT
@@ -1606,6 +1859,22 @@ class KissModemWrapper(LoRaRadio):
         if not success:
             raise Exception("Failed to initialize KISS modem")
 
+    @property
+    def is_degraded(self) -> bool:
+        """True while the serial link is known-bad and the reconnect loop owns it.
+
+        ``is_connected`` on its own cannot be read as "usable": it is also False for
+        the moments between opening the port and finishing the handshake. A caller
+        deciding whether to wait rather than fail -- a local transmit weighing
+        whether its retry has any chance -- wants this instead.
+        """
+        return self._degraded
+
+    @property
+    def degraded_reason(self) -> Optional[str]:
+        """Why the link was last marked degraded, or None while it is healthy."""
+        return self._degraded_reason
+
     def check_radio_health(self) -> bool:
         """Check modem connectivity. Returns True if connected and modem responds to ping."""
         if not self.is_connected:
@@ -1691,9 +1960,16 @@ class KissModemWrapper(LoRaRadio):
 
         # Wait for modem-level TX_DONE instead of treating queueing as success.
         # Run the blocking wait off the event loop.
-        success = await asyncio.to_thread(self.send_frame_and_wait, data, RESPONSE_TIMEOUT)
+        # Dispatch through the public method (subclasses and tests override it),
+        # collecting this send's own reason rather than reading shared state after
+        # the in-flight lock has been handed to the next sender.
+        verdict: list = []
+        success = await asyncio.to_thread(
+            self.send_frame_and_wait, data, RESPONSE_TIMEOUT, verdict=verdict
+        )
         if not success:
-            raise Exception("Failed to send frame via KISS modem (no TX_DONE)")
+            reason = (verdict[0] if verdict else None) or self._tx_last_verdict or "no TX_DONE"
+            raise Exception(f"Failed to send frame via KISS modem: {reason}")
 
         # Use short timeout for GET_AIRTIME so TX path is not blocked if modem
         # is busy or unresponsive (avoids 5s stall and subsequent bad state).
@@ -2101,13 +2377,15 @@ class KissModemWrapper(LoRaRadio):
                     self.stats["errors"] += 1
                     logger.warning(f"Modem error: 0x{err_code:02X}")
                 if err_code == HW_ERR_TX_BUSY:
-                    # TX_BUSY is a DATA-transmit rejection, not a SetHardware response.
-                    # Wake the in-flight DATA sender so it fails fast (and can retry)
-                    # rather than stalling until the TX_DONE timeout, and keep it out
-                    # of the SetHardware response path (where it would be mis-consumed
-                    # as the in-flight command's error reply).
-                    self._tx_done_result = False
-                    self._tx_done_event.set()
+                    # Not a verdict on the in-flight DATA frame: the same code covers a
+                    # host-output-queue overflow, which says nothing about our transmit
+                    # (see HW_ERR_TX_BUSY). Record it and let TX_DONE decide -- failing
+                    # the send here reported failure for frames that went out fine
+                    # whenever inbound traffic backed the modem's queue up. It still
+                    # must not reach the SetHardware response path, where it would be
+                    # mis-consumed as the in-flight command's error reply.
+                    self.stats["tx_busy"] += 1
+                    self._tx_busy_seen = True
                 else:
                     with self._response_lock:
                         expected = self._expected_response_subcmds
