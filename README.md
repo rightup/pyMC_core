@@ -150,13 +150,11 @@ Contributions are welcome! Please see our [contributing guide](https://docs.open
 
 ```bash
 # Clone the repository
-git clone https://github.com/rightup/openHop Core.git
-cd openHop Core
+git clone https://github.com/openhop-dev/openhop_core.git
+cd openhop_core
 
 # Install development dependencies
 pip install -e .[dev]
-
-
 ```
 
 
@@ -173,8 +171,8 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 ## Support
 
 - [Documentation](https://docs.openhop.dev/projects/openhop-core/)
-- [Issues](https://github.com/openhop-dev/openHop Core/issues)
-- [Discussions](https://github.com/openhop-dev/openHop Core/discussions)
+- [Issues](https://github.com/openhop-dev/openhop_core/issues)
+- [Discussions](https://github.com/openhop-dev/openhop_core/discussions)
 - [pyMC Discord](https://discord.gg/3s8MMaSTzq)
 - [Meshcore Discord](https://meshcore.gg/)
 
