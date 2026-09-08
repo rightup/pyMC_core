@@ -17,11 +17,11 @@ Features:
 import asyncio
 import random
 
-from common import create_mesh_node, print_packet_info
+from common import RADIO_TYPES, create_mesh_node, print_packet_info
 
-from pymc_core.protocol.constants import PAYLOAD_TYPE_TRACE
-from pymc_core.protocol.packet_builder import PacketBuilder
-from pymc_core.protocol.packet_utils import PacketDataUtils
+from openhop_core.protocol.constants import PAYLOAD_TYPE_TRACE
+from openhop_core.protocol.packet_builder import PacketBuilder
+from openhop_core.protocol.packet_utils import PacketDataUtils
 
 
 async def ping_repeater(radio_type: str = "waveshare", serial_port: str = "/dev/ttyUSB0"):
@@ -86,7 +86,7 @@ def main():
     parser = argparse.ArgumentParser(description="Ping a repeater using trace packets")
     parser.add_argument(
         "--radio-type",
-        choices=["waveshare", "uconsole", "meshadv-mini", "kiss-tnc", "kiss-modem"],
+        choices=RADIO_TYPES,
         default="waveshare",
         help="Radio hardware type (default: waveshare)",
     )

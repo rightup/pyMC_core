@@ -1,1 +1,1 @@
-# Examples package for PyMC Core
+# Examples package for openHop Core

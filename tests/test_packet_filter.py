@@ -1,6 +1,6 @@
 import time
 
-from pymc_core.protocol.packet_filter import PacketFilter
+from openhop_core.protocol.packet_filter import PacketFilter, PacketHashCache
 
 
 class TestPacketFilter:
@@ -152,3 +152,149 @@ class TestPacketFilter:
         pf_zero.track_packet("hash1")
         # With zero window, should not be considered duplicate immediately
         assert not pf_zero.is_duplicate("hash1")
+
+    def test_blacklist_cap_evicts_oldest(self):
+        """Inserting past BLACKLIST_MAX_ENTRIES evicts the oldest entry (FIFO)."""
+        pf = PacketFilter()
+        cap = PacketFilter.BLACKLIST_MAX_ENTRIES
+
+        for i in range(cap):
+            pf.blacklist(f"hash_{i}")
+        assert len(pf._blacklist) == cap
+        assert pf.is_blacklisted("hash_0")
+
+        # One more distinct entry pushes past the cap: oldest is evicted.
+        pf.blacklist("hash_overflow")
+        assert len(pf._blacklist) == cap
+        assert not pf.is_blacklisted("hash_0")
+        assert pf.is_blacklisted("hash_overflow")
+        assert pf.is_blacklisted("hash_1")  # second-oldest survives
+
+    def test_blacklist_cap_never_exceeded(self):
+        """Size never exceeds the cap even with many more insertions than capacity."""
+        pf = PacketFilter()
+        cap = PacketFilter.BLACKLIST_MAX_ENTRIES
+
+        for i in range(cap + 500):
+            pf.blacklist(f"hash_{i}")
+            assert len(pf._blacklist) <= cap
+        assert len(pf._blacklist) == cap
+
+    def test_blacklist_ttl_expiry(self, monkeypatch):
+        """An entry older than the TTL reads as not-blacklisted before cleanup runs,
+        and is actually removed once cleanup_old_hashes runs."""
+        pf = PacketFilter()
+        current = [1_000_000.0]
+        monkeypatch.setattr(time, "time", lambda: current[0])
+
+        pf.blacklist("stale_hash")
+        assert pf.is_blacklisted("stale_hash")
+
+        # Advance time past the TTL without running cleanup yet.
+        current[0] += PacketFilter.BLACKLIST_TTL_SECONDS + 1
+        assert not pf.is_blacklisted("stale_hash")
+        # Still physically present until cleanup runs.
+        assert "stale_hash" in pf._blacklist
+
+        pf.cleanup_old_hashes()
+        assert "stale_hash" not in pf._blacklist
+        assert not pf.is_blacklisted("stale_hash")
+
+    def test_is_blacklisted_does_not_mutate(self):
+        """is_blacklisted is a pure read: no timestamp refresh, no size/order change."""
+        pf = PacketFilter()
+        pf.blacklist("hash_a")
+        pf.blacklist("hash_b")
+
+        before_items = list(pf._blacklist.items())
+        for _ in range(5):
+            pf.is_blacklisted("hash_a")
+            pf.is_blacklisted("hash_b")
+            pf.is_blacklisted("nonexistent")
+        after_items = list(pf._blacklist.items())
+
+        assert before_items == after_items
+        assert len(pf._blacklist) == 2
+
+    def test_reblacklisting_refreshes_timestamp_and_order(self, monkeypatch):
+        """Re-blacklisting an existing entry updates its timestamp and moves it
+        to the most-recently-inserted end."""
+        pf = PacketFilter()
+        current = [2_000_000.0]
+        monkeypatch.setattr(time, "time", lambda: current[0])
+
+        pf.blacklist("first")
+        current[0] += 10
+        pf.blacklist("second")
+        assert list(pf._blacklist.keys()) == ["first", "second"]
+        assert pf._blacklist["first"] == 2_000_000.0
+
+        # Re-blacklist "first": timestamp refreshes and it becomes newest.
+        current[0] += 10
+        pf.blacklist("first")
+        assert pf._blacklist["first"] == 2_000_020.0
+        assert list(pf._blacklist.keys()) == ["second", "first"]
+
+    def test_blacklist_basic_membership(self):
+        """Basic membership still works after the TTL/cap rework."""
+        pf = PacketFilter()
+        assert not pf.is_blacklisted("some_hash")
+        pf.blacklist("some_hash")
+        assert pf.is_blacklisted("some_hash")
+        assert not pf.is_blacklisted("other_hash")
+
+
+class TestPacketHashCache:
+    def test_uses_full_hash_keys(self):
+        cache = PacketHashCache(ttl_seconds=60, max_entries=4)
+        full_hash = "ab" * 32
+        same_prefix_different_hash = "ab" * 8 + "cd" * 24
+
+        assert cache.check_and_add(full_hash) is False
+        assert cache.check_and_add(same_prefix_different_hash) is False
+        assert cache.check_and_add(full_hash) is True
+
+    def test_evicts_oldest_entry_at_capacity(self):
+        cache = PacketHashCache(ttl_seconds=60, max_entries=2)
+
+        assert cache.check_and_add("first") is False
+        assert cache.check_and_add("second") is False
+        assert cache.check_and_add("third") is False
+        assert cache.check_and_add("first") is False
+
+    def test_evicts_expired_entries_on_insert(self):
+        cache = PacketHashCache(ttl_seconds=60, max_entries=4)
+        cache._entries["expired"] = time.monotonic() - 61
+
+        assert cache.check_and_add("fresh") is False
+        assert list(cache._entries) == ["fresh"]
+
+    def test_hit_refreshes_entry_lifetime(self):
+        """Suppression extends while duplicates keep arriving: an entry near
+        expiry that gets a hit survives past its original TTL."""
+        cache = PacketHashCache(ttl_seconds=60, max_entries=4)
+        cache._entries["echoing"] = time.monotonic() - 50  # 10 s of TTL left
+
+        assert cache.check_and_add("echoing") is True
+        # The hit reset the clock: backdating by the original remainder no
+        # longer expires it.
+        cache._entries["echoing"] -= 50
+        assert cache.check_and_add("echoing") is True
+
+    def test_entry_expires_after_quiet_ttl(self):
+        cache = PacketHashCache(ttl_seconds=60, max_entries=4)
+        assert cache.check_and_add("once") is False
+        cache._entries["once"] = time.monotonic() - 61
+
+        assert cache.check_and_add("once") is False  # expired -> fresh again
+
+    def test_hit_refreshes_lru_position(self):
+        """A refreshed entry moves to the back of the eviction order."""
+        cache = PacketHashCache(ttl_seconds=60, max_entries=2)
+        assert cache.check_and_add("first") is False
+        assert cache.check_and_add("second") is False
+        assert cache.check_and_add("first") is True  # refresh: now newest
+
+        assert cache.check_and_add("third") is False  # evicts "second"
+        assert cache.check_and_add("first") is True
+        assert cache.check_and_add("second") is False

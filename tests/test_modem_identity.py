@@ -10,7 +10,7 @@ from unittest.mock import MagicMock
 import pytest
 from nacl.signing import SigningKey
 
-from pymc_core.protocol.modem_identity import ModemIdentity
+from openhop_core.protocol.modem_identity import ModemIdentity
 
 # Generate a valid Ed25519 keypair for testing
 _TEST_SIGNING_KEY = SigningKey.generate()

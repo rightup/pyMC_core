@@ -19,9 +19,9 @@ import asyncio
 import random
 import time
 
-from common import create_mesh_node
+from common import RADIO_TYPES, create_mesh_node
 
-from pymc_core.protocol.packet_builder import PacketBuilder
+from openhop_core.protocol.packet_builder import PacketBuilder
 
 # ADV_TYPE_REPEATER = 2, so filter mask is (1 << 2) = 0x04
 FILTER_REPEATERS = 0x04  # Bit 2 set for repeater node type
@@ -149,7 +149,7 @@ def main():
     parser = argparse.ArgumentParser(description="Discover nearby mesh nodes")
     parser.add_argument(
         "--radio-type",
-        choices=["waveshare", "uconsole", "meshadv-mini", "kiss-tnc", "kiss-modem"],
+        choices=RADIO_TYPES,
         default="waveshare",
         help="Radio hardware type (default: waveshare)",
     )

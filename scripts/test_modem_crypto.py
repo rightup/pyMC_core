@@ -14,9 +14,9 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from pymc_core.hardware.kiss_modem_wrapper import KissModemWrapper  # noqa: E402
-from pymc_core.protocol.crypto import CryptoUtils  # noqa: E402
-from pymc_core.protocol.identity import Identity, LocalIdentity  # noqa: E402
+from openhop_core.hardware.kiss_modem_wrapper import KissModemWrapper  # noqa: E402
+from openhop_core.protocol.crypto import CryptoUtils  # noqa: E402
+from openhop_core.protocol.identity import Identity, LocalIdentity  # noqa: E402
 
 
 def test_modem_crypto(port: str = "/dev/cu.usbmodem1101"):

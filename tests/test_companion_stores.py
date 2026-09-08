@@ -1,7 +1,13 @@
 """Tests for companion stores and models: ContactStore, ChannelStore, MessageQueue, PathCache."""
 
-from pymc_core.companion import ChannelStore, ContactStore, MessageQueue, PathCache, StatsCollector
-from pymc_core.companion.models import (
+from openhop_core.companion import (
+    ChannelStore,
+    ContactStore,
+    MessageQueue,
+    PathCache,
+    StatsCollector,
+)
+from openhop_core.companion.models import (
     AdvertPath,
     Channel,
     Contact,
@@ -179,6 +185,25 @@ class TestContactStore:
         since_150 = store.get_all(since=150)
         assert len(since_150) == 2
 
+    def test_count_is_full_size_regardless_of_since_filter(self):
+        # count() reports the full real-contact total for CONTACTS_START, even
+        # when a 'since' filter narrows the synced list to fewer entries.
+        store = ContactStore(max_contacts=10)
+        store.add(Contact(public_key=b"\x01" * 32, name="A", adv_type=1, lastmod=100))
+        store.add(Contact(public_key=b"\x02" * 32, name="B", adv_type=1, lastmod=200))
+        store.add(Contact(public_key=b"\x03" * 32, name="C", adv_type=1, lastmod=300))
+        assert store.count() == 3
+        assert len(store.get_all(since=250)) == 1
+
+    def test_count_excludes_transient_anon(self):
+        # Transient/anon (ADV_TYPE_NONE) entries are never synced, so they must
+        # not inflate the CONTACTS_START total.
+        store = ContactStore(max_contacts=10)
+        store.add(Contact(public_key=b"\x01" * 32, name="A", adv_type=1))
+        store.add_transient(Contact(public_key=b"\x02" * 32, name="", adv_type=0))
+        assert store.get_count() == 2
+        assert store.count() == 1
+
     def test_clear(self):
         store = ContactStore(max_contacts=5)
         store.add(Contact(public_key=b"\x01" * 32, name="A"))
@@ -221,6 +246,56 @@ class TestContactStore:
         assert store.get_by_key_prefix(b"\x11\x22") is not None
         assert store.get_by_key_prefix(b"\x11\x22\x33").name == "Prefix"
         assert store.get_by_key_prefix(b"\xff\xff") is None
+
+    # --- Transient/anon contacts (ADV_TYPE_NONE, PR #2672) ---
+
+    def _anon(self, b: int, lastmod: int = 0) -> Contact:
+        return Contact(
+            public_key=bytes([b]) * 32,
+            name="",
+            adv_type=0,
+            out_path_len=0,
+            lastmod=lastmod,
+        )
+
+    def test_add_transient_basic(self):
+        store = ContactStore(max_contacts=5)
+        assert store.add_transient(self._anon(1)) is True
+        assert store.get_by_key(b"\x01" * 32) is not None
+
+    def test_add_transient_pool_capped_reuses_oldest(self):
+        from openhop_core.companion.constants import MAX_ANON_CONTACTS
+
+        store = ContactStore(max_contacts=1000)
+        for i in range(MAX_ANON_CONTACTS):
+            store.add_transient(self._anon(i + 1, lastmod=i + 1))
+        assert store.get_count() == MAX_ANON_CONTACTS
+        # Oldest (lastmod=1, key 0x01) should be evicted by the 9th.
+        store.add_transient(self._anon(99, lastmod=100))
+        assert store.get_count() == MAX_ANON_CONTACTS
+        assert store.get_by_key(b"\x01" * 32) is None
+        assert store.get_by_key(b"\x63" * 32) is not None  # 0x63 == 99
+
+    def test_to_dicts_excludes_transient(self):
+        store = ContactStore(max_contacts=5)
+        store.add(Contact(public_key=b"\xaa" * 32, name="Real", adv_type=1))
+        store.add_transient(self._anon(2))
+        dicts = store.to_dicts()
+        assert len(dicts) == 1
+        assert dicts[0]["name"] == "Real"
+
+    def test_add_or_overwrite_never_evicts_for_or_via_anon(self):
+        # A full store of real contacts plus an anon entry: overwrite must replace
+        # a real non-favourite, never the anon slot, and never be blocked by it.
+        store = ContactStore(max_contacts=2)
+        store.add(Contact(public_key=b"\x01" * 32, name="A", adv_type=1, lastmod=10))
+        store.add_transient(self._anon(2, lastmod=1))  # oldest overall, but anon
+        ok, overwritten = store.add_or_overwrite(
+            Contact(public_key=b"\x03" * 32, name="C", adv_type=1, lastmod=50)
+        )
+        assert ok is True
+        assert overwritten == b"\x01" * 32  # the real contact, not the anon slot
+        assert store.get_by_key(b"\x02" * 32) is not None  # anon untouched
 
 
 # ---------------------------------------------------------------------------
@@ -299,15 +374,38 @@ class TestMessageQueue:
         assert q.count == 0
         assert q.pop() is None
 
-    def test_maxlen_drops_oldest(self):
+    def test_full_direct_queue_rejects_new_message(self):
         q = MessageQueue(max_size=2)
         q.push(QueuedMessage(sender_key=b"\x01" * 32, text="1"))
         q.push(QueuedMessage(sender_key=b"\x02" * 32, text="2"))
-        q.push(QueuedMessage(sender_key=b"\x03" * 32, text="3"))
+        assert q.push(QueuedMessage(sender_key=b"\x03" * 32, text="3")) is False
         assert q.count == 2
         first = q.pop()
-        assert first.text == "2"
-        assert q.pop().text == "3"
+        assert first.text == "1"
+        assert q.pop().text == "2"
+
+    def test_full_queue_evicts_oldest_channel_message(self):
+        q = MessageQueue(max_size=3)
+        direct_one = QueuedMessage(sender_key=b"\x01" * 32, text="direct one")
+        channel_one = QueuedMessage(sender_key=b"", is_channel=True, text="channel one")
+        direct_two = QueuedMessage(sender_key=b"\x02" * 32, text="direct two")
+        incoming = QueuedMessage(sender_key=b"\x03" * 32, text="incoming direct")
+
+        assert q.push(direct_one) is True
+        assert q.push(channel_one) is True
+        assert q.push(direct_two) is True
+        assert q.push(incoming) is True
+
+        assert [q.pop().text for _ in range(3)] == [
+            "direct one",
+            "direct two",
+            "incoming direct",
+        ]
+
+    def test_zero_capacity_rejects_message(self):
+        q = MessageQueue(max_size=0)
+        assert q.push(QueuedMessage(sender_key=b"", text="not retained")) is False
+        assert q.is_empty() is True
 
     def test_clear(self):
         q = MessageQueue(max_size=5)
@@ -315,6 +413,34 @@ class TestMessageQueue:
         q.clear()
         assert q.count == 0
         assert q.pop() is None
+
+    def test_remove_by_identity_from_middle(self):
+        q = MessageQueue(max_size=5)
+        first = QueuedMessage(sender_key=b"\x01" * 32, text="first")
+        middle = QueuedMessage(sender_key=b"\x02" * 32, text="middle")
+        last = QueuedMessage(sender_key=b"\x03" * 32, text="last")
+        q.push(first)
+        q.push(middle)
+        q.push(last)
+
+        assert q.remove(middle) is True
+        assert q.count == 2
+        assert [q.pop().text for _ in range(2)] == ["first", "last"]
+
+    def test_remove_absent_returns_false(self):
+        q = MessageQueue(max_size=5)
+        held = QueuedMessage(sender_key=b"\x01" * 32, text="held")
+        q.push(held)
+
+        # An equal-but-distinct instance is not the same identity.
+        twin = QueuedMessage(sender_key=b"\x01" * 32, text="held")
+        assert q.remove(twin) is False
+        assert q.count == 1
+        assert q.peek() is held
+
+    def test_remove_from_empty_returns_false(self):
+        q = MessageQueue(max_size=5)
+        assert q.remove(QueuedMessage(sender_key=b"", text="x")) is False
 
 
 # ---------------------------------------------------------------------------

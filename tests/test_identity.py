@@ -1,5 +1,5 @@
-from pymc_core import LocalIdentity
-from pymc_core.protocol.identity import Identity
+from openhop_core import LocalIdentity
+from openhop_core.protocol.identity import Identity
 
 
 # LocalIdentity tests

@@ -3,7 +3,7 @@ import logging
 
 import pytest
 
-from pymc_core.node.events import EventService, EventSubscriber, MeshEvents
+from openhop_core.node.events import EventService, EventSubscriber, MeshEvents
 
 
 class MockEventSubscriber(EventSubscriber):

@@ -1,0 +1,35 @@
+# openHop / MeshCore USB modem - stable, colon-free device symlink
+#
+# ESP32-S3 boards that talk over the chip's native USB-Serial-JTAG peripheral
+# report their factory MAC address *with colons* as the USB serial number, so
+# udev builds a /dev/serial/by-id/ name that looks like:
+#
+#   usb-Espressif_USB_JTAG_serial_debug_unit_60:55:F9:C0:27:18-if00
+#
+# Docker parses `devices:` entries as host:container[:permissions] and offers no
+# way to escape a colon inside the path, so that name cannot be handed to a
+# container at all. /dev/serial/by-path/ is no better - those contain PCI
+# addresses, which also have colons.
+#
+# This rule creates /dev/openhop-modem, which is colon-free, stable across
+# re-plugs, and safe to use in a compose file:
+#
+#   devices:
+#     - /dev/openhop-modem:/dev/openhop-modem
+#
+# Install on the HOST (udev does not run inside a container):
+#
+#   sudo cp 99-openhop-modem.rules /etc/udev/rules.d/
+#   sudo udevadm control --reload-rules
+#   sudo udevadm trigger --subsystem-match=tty --action=change
+#
+SUBSYSTEM=="tty", ATTRS{idVendor}=="303a", ATTRS{idProduct}=="1001", GROUP="dialout", MODE="0660", TAG+="uaccess", SYMLINK+="openhop-modem"
+
+# 303a:1001 is Espressif's native-USB identifier and is shared by every
+# ESP32-S3/C3 board that uses it. With more than one attached, the symlink
+# lands on whichever enumerates first - pin it to a single board instead by
+# commenting out the rule above and using this one, with the serial number from:
+#
+#   udevadm info -a -n /dev/ttyACM0 | grep -E 'idVendor|idProduct|ATTRS\{serial\}'
+#
+#SUBSYSTEM=="tty", ATTRS{idVendor}=="303a", ATTRS{idProduct}=="1001", ATTRS{serial}=="60:55:F9:C0:27:18", GROUP="dialout", MODE="0660", TAG+="uaccess", SYMLINK+="openhop-modem"

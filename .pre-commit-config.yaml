@@ -10,10 +10,11 @@ repos:
 
   # Python formatting (Black) - apply to all Python files
   - repo: https://github.com/psf/black
-    rev: 23.3.0
+    rev: 26.5.1
     hooks:
       - id: black
         language_version: python3
+        exclude: '^(tests/|examples/|src/openhop_core/hardware/lora/)'
 
   # Python import sorting (isort) - apply to all Python files
   - repo: https://github.com/pycqa/isort
@@ -21,37 +22,24 @@ repos:
     hooks:
       - id: isort
         args: ["--profile", "black", "--line-length", "100"]
+        exclude: '^(tests/|src/openhop_core/hardware/lora/)'
 
   # Python linting (flake8) - strict settings for code quality
   - repo: https://github.com/pycqa/flake8
-    rev: 6.0.0
+    rev: 7.1.1
     hooks:
       - id: flake8
-        # Strict but reasonable settings
-        args: [
-          "--max-line-length=100",
-          "--extend-ignore=E203,E231,W503"
-        ]
+        # Settings live in .flake8 so a bare `flake8` run matches this hook.
         # Exclude third-party code but check our core code
-        exclude: '^(src/pymc_core/hardware/lora/|examples/)'
+        exclude: '^(src/openhop_core/hardware/lora/|examples/|scripts/test_modem_crypto\.py$)'
 
-  # Run pytest to ensure all tests pass
-  # - repo: local
-  #   hooks:
-  #     - id: pytest
-  #       name: pytest
-  #       entry: pytest
-  #       language: system
-  #       pass_filenames: false
-  #       # Only run if Python files in src/ or tests/ have changed
-  #       files: ^(src/|tests/|pyproject\.toml|setup\.py).*$
-  #       args: ["-v", "--tb=short"]
-  #     - id: pytest-fast
-  #       name: pytest-fast (quick smoke test)
-  #       entry: pytest
-  #       language: system
-  #       pass_filenames: false
-  #       # Run a quick subset of tests for faster feedback
-  #       files: ^(src/|tests/).*\.py$
-  #       args: ["-v", "--tb=short", "-x", "--maxfail=3", "tests/test_basic.py", "tests/test_crypto.py"]
-  #       stages: [manual]
+  # Test suite gate
+  - repo: local
+    hooks:
+      - id: pytest
+        name: pytest
+        entry: ./scripts/precommit-pytest.sh
+        language: system
+        pass_filenames: false
+        always_run: true
+        types: [python]

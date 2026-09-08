@@ -1,6 +1,6 @@
 # openHop Core
 
-[![Documentation](https://img.shields.io/badge/docs-GitHub%20Pages-blue)](https://docs.openhop.dev/projects/openhop-core/)
+[![Documentation](https://img.shields.io/badge/docs-docs.openhop.dev-blue)](https://docs.openhop.dev/projects/openhop-core/)
 [![PyPI](https://img.shields.io/pypi/v/openhop-core)](https://pypi.org/project/openhop-core/)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
@@ -10,7 +10,12 @@
 
 ## Documentation
 
-**Complete documentation is available at **[https://docs.openhop.dev/projects/openhop-core/](https://docs.openhop.dev/projects/openhop-core/)**
+**Complete documentation is available at [docs.openhop.dev](https://docs.openhop.dev/projects/openhop-core/).**
+
+### Quick Links
+- [Node Usage Guide](https://docs.openhop.dev/projects/openhop-core/node-usage/) - Guide for using MeshNode
+- [Examples](https://docs.openhop.dev/projects/openhop-core/examples/) - Working code examples
+- [API Reference](https://docs.openhop.dev/projects/openhop-core/api-reference/) - Detailed API documentation
 
 ## Quick Start
 
@@ -66,6 +71,8 @@ async def main():
 asyncio.run(main())
 ```
 
+For examples, see the [documentation](https://docs.openhop.dev/projects/openhop-core/examples/).
+
 ## Hardware Support
 
 ### Supported Radios
@@ -77,7 +84,7 @@ asyncio.run(main())
 - Raspberry Pi (or compatible SBC)
 - SX1262 LoRa module
 - SPI interface enabled
-- Python 3.9+
+- Python 3.10+
 
 ## What is MeshCore?
 
@@ -130,31 +137,24 @@ openHop Core/
 │   ├── send_flood_advert.py
 │   ├── send_direct_advert.py
 │   └── ...
-├── docs/                   # MkDocs documentation
-│   ├── docs/               # Documentation source files
-│   ├── mkdocs.yml          # MkDocs configuration
-│   ├── requirements.txt    # Documentation dependencies
-│   └── serve-docs.sh       # Local development script
 ├── .github/workflows/      # GitHub Actions
-│   └── deploy-docs.yml     # Documentation deployment pipeline
+│   └── publish-pypi.yml    # Package test and publication pipeline
 └── tests/                  # Unit tests
 ```
 
 ## Contributing
 
-Contributions are welcome! Please see our [contributing guide] for details.
+Contributions are welcome! Please see our [contributing guide](https://docs.openhop.dev/projects/openhop-core/development/) for details.
 
 ### Development Setup
 
 ```bash
 # Clone the repository
-git clone https://github.com/rightup/openHop Core.git
-cd openHop Core
+git clone https://github.com/openhop-dev/openhop_core.git
+cd openhop_core
 
 # Install development dependencies
 pip install -e .[dev]
-
-
 ```
 
 
@@ -171,9 +171,9 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 ## Support
 
 - [Documentation](https://docs.openhop.dev/projects/openhop-core/)
-- [Issues](https://github.com/openhop-dev/openHop Core/issues)
-- [Discussions](https://github.com/openhop-dev/openHop Core/discussions)
-- [openHop Discord](https://discord.gg/3s8MMaSTzq)
+- [Issues](https://github.com/openhop-dev/openhop_core/issues)
+- [Discussions](https://github.com/openhop-dev/openhop_core/discussions)
+- [pyMC Discord](https://discord.gg/3s8MMaSTzq)
 - [Meshcore Discord](https://meshcore.gg/)
 
 ---

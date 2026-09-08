@@ -7,7 +7,7 @@ import asyncio
 import logging
 from typing import Any, Dict, List, Optional, Tuple
 
-from common import create_radio
+from common import RADIO_TYPES, create_radio
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -227,7 +227,7 @@ async def calibrate_cad(radio_type: str = "waveshare", staged: bool = True):
     try:
         # Create and verify radio
         radio = create_radio(radio_type)
-        from pymc_core.hardware.sx1262_wrapper import SX1262Radio
+        from openhop_core.hardware.sx1262_wrapper import SX1262Radio
 
         if not isinstance(radio, SX1262Radio):
             logger.error(f"Need SX1262Radio, got {type(radio).__name__}")
@@ -304,7 +304,7 @@ def main():
     parser = argparse.ArgumentParser(description="CAD Calibration Tool with Staged Workflow")
     parser.add_argument(
         "--radio",
-        choices=["waveshare", "uconsole", "meshadv-mini", "kiss-tnc", "kiss-modem"],
+        choices=RADIO_TYPES,
         default="waveshare",
         help="Radio type",
     )

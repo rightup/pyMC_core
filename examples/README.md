@@ -1,6 +1,6 @@
-# PyMC Core Examples
+# openHop Core Examples
 
-This directory contains examples demonstrating how to use PyMC Core with different radio hardware configurations.
+This directory contains examples demonstrating how to use openHop Core with different radio hardware configurations.
 
 ## Available Examples
 
@@ -180,7 +180,7 @@ Provides shared utilities for examples:
 4. Test with terminal: `screen /dev/ttyUSB0 115200`
 
 ### Import Errors:
-Make sure pymc_core is properly installed:
+Make sure openhop_core is properly installed:
 ```bash
 cd ../
 pip install -e .

@@ -1,93 +1,137 @@
+"""Lifecycle tests for MeshNode start/stop (cooperative dispatcher shutdown)."""
+
+from __future__ import annotations
+
+import asyncio
+
 import pytest
 
-from pymc_core import LocalIdentity
+from openhop_core.node.node import MeshNode
+from openhop_core.protocol import LocalIdentity
 
 
-# MeshNode tests (mock-based since we don't have real radio hardware)
-def test_mesh_node_initialization():
-    """Test MeshNode initialization with mock radio."""
+class MockRadio:
+    """Minimal radio: set_rx_callback, send, RSSI/SNR stubs."""
 
-    # Create a mock radio
-    class MockRadio:
-        def __init__(self):
-            self.state = "idle"
+    def __init__(self):
+        self.rx_callback = None
+        self.sent: list[bytes] = []
 
-        def get_state(self):
-            return self.state
+    def set_rx_callback(self, callback):
+        self.rx_callback = callback
 
-    # Create mock components
-    radio = MockRadio()
-    identity = LocalIdentity()
-    # contacts = None  # Simplified for test (unused for now)
+    async def send(self, data: bytes):
+        self.sent.append(data)
+        return {}
 
-    # This would normally create a MeshNode, but we'll skip the full init for now
-    assert radio is not None
-    assert identity is not None
+    def get_last_rssi(self):
+        return -70
 
-
-def test_mesh_node_with_config():
-    """Test MeshNode with configuration."""
-    # Mock test - in real scenario would test config loading
-    assert True
+    def get_last_snr(self):
+        return 5.0
 
 
-def test_mesh_node_helper_methods():
-    """Test MeshNode helper methods."""
-    # Mock test - in real scenario would test helper methods
-    assert True
-
-
-# ResponseWaiter tests
-def test_response_waiter():
-    """Test ResponseWaiter functionality."""
-    from pymc_core.node import MeshNode
-
-    waiter = MeshNode._ResponseWaiter()
-
-    # Test callback
-    waiter.callback(True, "Test response", {"key": "value"})
-
-    assert waiter.data["success"]
-    assert waiter.data["text"] == "Test response"
-    assert waiter.data["parsed"] == {"key": "value"}
+def _make_node(radio: MockRadio | None = None) -> tuple[MeshNode, MockRadio]:
+    radio = radio or MockRadio()
+    node = MeshNode(radio, LocalIdentity())
+    return node, radio
 
 
 @pytest.mark.asyncio
-async def test_response_waiter_timeout():
-    """Test ResponseWaiter timeout functionality."""
-    from pymc_core.node import MeshNode
+async def test_stop_exits_start_task():
+    node, _radio = _make_node()
+    task = asyncio.create_task(node.start())
+    await asyncio.sleep(0)  # let run_forever arm
+    assert not task.done()
 
-    waiter = MeshNode._ResponseWaiter()
-
-    # Test timeout
-    result = await waiter.wait(timeout=0.1)
-    assert not result["success"]
-    assert result["text"] is None
-    assert result["timeout"]
+    await node.stop()
+    await asyncio.wait_for(task, timeout=2.0)
+    assert task.done()
+    assert task.exception() is None
 
 
-def test_time_operation_context_manager():
-    """Test the _time_operation context manager."""
+@pytest.mark.asyncio
+async def test_stop_is_idempotent():
+    node, _radio = _make_node()
+    task = asyncio.create_task(node.start())
+    await asyncio.sleep(0)
 
-    class MockNode:
-        def _time_operation(self):
-            import time
-            from contextlib import contextmanager
+    await node.stop()
+    await node.stop()
+    await asyncio.wait_for(task, timeout=2.0)
 
-            @contextmanager
-            def timer():
-                start_time = time.time()
-                yield lambda: (time.time() - start_time) * 1000  # RTT in milliseconds
 
-            return timer()
+@pytest.mark.asyncio
+async def test_stop_without_start_does_not_hang():
+    node, radio = _make_node()
+    # Construction arms RX; stop should disarm and return immediately.
+    assert radio.rx_callback is not None
+    await asyncio.wait_for(node.stop(), timeout=1.0)
+    assert radio.rx_callback is None
+    assert node.dispatcher._rx_enabled is False
 
-    node = MockNode()
-    timer = node._time_operation()
 
-    with timer as get_rtt:
-        import time
+@pytest.mark.asyncio
+async def test_stop_disarms_rx_no_new_packet_tasks():
+    node, radio = _make_node()
+    task = asyncio.create_task(node.start())
+    await asyncio.sleep(0)
+    assert radio.rx_callback is not None
+    assert radio.rx_callback.__func__ is node.dispatcher._on_packet_received.__func__
 
-        time.sleep(0.01)  # Sleep for 10ms
-        rtt = get_rtt()
+    await node.stop()
+    await asyncio.wait_for(task, timeout=2.0)
 
-    assert rtt >= 10.0  # Should be at least 10ms
+    assert radio.rx_callback is None
+    assert node.dispatcher._rx_enabled is False
+
+    # Gate drops deliveries even if a stale callback handle were kept.
+    spawned: list[asyncio.Task] = []
+    real_create = asyncio.get_running_loop().create_task
+
+    def tracking_create(coro, *args, **kwargs):
+        t = real_create(coro, *args, **kwargs)
+        spawned.append(t)
+        return t
+
+    loop = asyncio.get_running_loop()
+    loop.create_task = tracking_create  # type: ignore[method-assign]
+    try:
+        node.dispatcher._on_packet_received(b"\x00" * 16)
+        await asyncio.sleep(0)
+    finally:
+        loop.create_task = real_create  # type: ignore[method-assign]
+
+    assert spawned == []
+
+
+@pytest.mark.asyncio
+async def test_restart_rearms_rx():
+    node, radio = _make_node()
+
+    task1 = asyncio.create_task(node.start())
+    await asyncio.sleep(0)
+    await node.stop()
+    await asyncio.wait_for(task1, timeout=2.0)
+    assert radio.rx_callback is None
+
+    task2 = asyncio.create_task(node.start())
+    await asyncio.sleep(0)
+    assert node.dispatcher._rx_enabled is True
+    assert radio.rx_callback is not None
+    assert radio.rx_callback.__func__ is node.dispatcher._on_packet_received.__func__
+
+    await node.stop()
+    await asyncio.wait_for(task2, timeout=2.0)
+
+
+@pytest.mark.asyncio
+async def test_cleanup_signals_stop_without_await():
+    node, radio = _make_node()
+    task = asyncio.create_task(node.start())
+    await asyncio.sleep(0)
+
+    node.dispatcher.cleanup()
+    await asyncio.wait_for(task, timeout=2.0)
+    assert radio.rx_callback is None
+    assert node.dispatcher._rx_enabled is False

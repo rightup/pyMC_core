@@ -8,10 +8,10 @@ that all subscribers can receive.
 
 import asyncio
 
-from common import create_mesh_node, print_packet_info
+from common import RADIO_TYPES, create_mesh_node, print_packet_info
 
-from pymc_core.protocol import Packet
-from pymc_core.protocol.packet_builder import PacketBuilder
+from openhop_core.protocol import Packet
+from openhop_core.protocol.packet_builder import PacketBuilder
 
 
 async def send_channel_message(radio_type: str = "waveshare", serial_port: str = "/dev/ttyUSB0"):
@@ -71,7 +71,7 @@ def main():
     parser = argparse.ArgumentParser(description="Send a channel message to the Public channel")
     parser.add_argument(
         "--radio-type",
-        choices=["waveshare", "uconsole", "meshadv-mini", "kiss-tnc", "kiss-modem"],
+        choices=RADIO_TYPES,
         default="waveshare",
         help="Radio hardware type (default: waveshare)",
     )

@@ -10,9 +10,9 @@ Simply run this script and it will respond to any discovery requests until stopp
 
 import asyncio
 
-from common import create_mesh_node
+from common import RADIO_TYPES, create_mesh_node
 
-from pymc_core.protocol.packet_builder import PacketBuilder
+from openhop_core.protocol.packet_builder import PacketBuilder
 
 # Node type values from C++ AdvertDataHelpers.h
 ADV_TYPE_REPEATER = 2
@@ -121,7 +121,7 @@ def main():
     parser = argparse.ArgumentParser(description="Respond to mesh node discovery requests")
     parser.add_argument(
         "--radio-type",
-        choices=["waveshare", "uconsole", "meshadv-mini", "kiss-tnc", "kiss-modem"],
+        choices=RADIO_TYPES,
         default="waveshare",
         help="Radio hardware type (default: waveshare)",
     )

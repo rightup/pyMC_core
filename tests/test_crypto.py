@@ -1,4 +1,4 @@
-from pymc_core import CryptoUtils
+from openhop_core import CryptoUtils
 
 
 # CryptoUtils tests
@@ -37,7 +37,7 @@ def test_crypto_utils_encrypt_then_mac():
 
 def test_crypto_utils_key_exchange():
     """Test ECDH key exchange utilities."""
-    from pymc_core import LocalIdentity
+    from openhop_core import LocalIdentity
 
     # Create two identities for key exchange
     alice = LocalIdentity()
@@ -70,7 +70,7 @@ def test_ed25519_expand_seed_to_meshcore_64_same_public_key():
     """
     from nacl.bindings import crypto_scalarmult_ed25519_base_noclamp
 
-    from pymc_core import LocalIdentity
+    from openhop_core import LocalIdentity
 
     # Fixed seed for reproducible test
     seed = bytes.fromhex("70" + "65e18fd9fabb70c1ed90dca19907de" "698c88b709ea146eafd93d9b830c7b60")

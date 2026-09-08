@@ -8,11 +8,11 @@ on:
       environment:
         description: 'Environment to deploy to'
         required: true
-        default: 'testpypi'
+        default: 'pypi-dev'
         type: choice
         options:
-          - testpypi
           - pypi
+          - pypi-dev
 
 permissions:
   contents: read
@@ -23,19 +23,19 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        python-version: ['3.9', '3.10', '3.11', '3.12']
+        python-version: ['3.10', '3.11', '3.12', '3.13']
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Setup Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
 
       - name: Cache pip dependencies
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         with:
           path: ~/.cache/pip
           key: ${{ runner.os }}-pip-${{ matrix.python-version }}-${{ hashFiles('pyproject.toml') }}
@@ -46,7 +46,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -e .[dev]
+          pip install -e .[test]
 
       - name: Run tests
         run: |
@@ -58,10 +58,10 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Setup Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
@@ -69,6 +69,28 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install build twine
+
+      - name: Set dev version
+        if: github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'pypi-dev'
+        run: |
+          python - <<'PY'
+          import pathlib
+          import re
+
+          path = pathlib.Path("pyproject.toml")
+          text = path.read_text()
+
+          match = re.search(r'^version\s*=\s*"([^"]+)"\s*$', text, re.MULTILINE)
+          if not match:
+            raise SystemExit("Could not find [project] version in pyproject.toml")
+
+          base_version = re.sub(r'\.dev\d+$', '', match.group(1))
+          dev_version = f"{base_version}.dev${{ github.run_number }}"
+
+          updated = text[:match.start(1)] + dev_version + text[match.end(1):]
+          path.write_text(updated)
+          print(f"Using dev version: {dev_version}")
+          PY
 
       - name: Build package
         run: python -m build
@@ -82,10 +104,17 @@ jobs:
           name: dist
           path: dist/
 
-  publish-testpypi:
+  publish-pypi:
     runs-on: ubuntu-latest
     needs: build
-    if: github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'testpypi'
+    if: github.event_name == 'release' || github.event_name == 'workflow_dispatch'
+
+    environment:
+      name: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'pypi-dev' && 'testpypi' || 'pypi' }}
+
+    permissions:
+      contents: read
+      id-token: write
 
     steps:
       - name: Download build artifacts
@@ -94,22 +123,12 @@ jobs:
           name: dist
           path: dist/
 
-      - name: Publish to TestPyPI
+      - name: Publish dev build to TestPyPI
+        if: github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'pypi-dev'
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           repository-url: https://test.pypi.org/legacy/
 
-  publish-pypi:
-    runs-on: ubuntu-latest
-    needs: build
-    if: github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'pypi')
-
-    steps:
-      - name: Download build artifacts
-        uses: actions/download-artifact@v4
-        with:
-          name: dist
-          path: dist/
-
-      - name: Publish to PyPI
+      - name: Publish release to PyPI
+        if: github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'pypi')
         uses: pypa/gh-action-pypi-publish@release/v1

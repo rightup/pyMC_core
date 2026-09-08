@@ -1,1 +1,1 @@
-# Tests for PyMC_Core
+# Tests for OpenHop_Core

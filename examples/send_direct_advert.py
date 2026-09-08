@@ -10,10 +10,10 @@ The direct advert is sent without expecting any acknowledgment or response.
 
 import asyncio
 
-from common import create_mesh_node, print_packet_info
+from common import RADIO_TYPES, create_mesh_node, print_packet_info
 
-from pymc_core.protocol.constants import ADVERT_FLAG_IS_CHAT_NODE
-from pymc_core.protocol.packet_builder import PacketBuilder
+from openhop_core.protocol.constants import ADVERT_FLAG_IS_CHAT_NODE
+from openhop_core.protocol.packet_builder import PacketBuilder
 
 
 async def send_direct_advert(radio_type: str = "waveshare", serial_port: str = "/dev/ttyUSB0"):
@@ -51,7 +51,7 @@ def main():
     parser = argparse.ArgumentParser(description="Send a direct advertisement packet")
     parser.add_argument(
         "--radio-type",
-        choices=["waveshare", "uconsole", "meshadv-mini", "kiss-tnc", "kiss-modem"],
+        choices=RADIO_TYPES,
         default="waveshare",
         help="Radio hardware type (default: waveshare)",
     )

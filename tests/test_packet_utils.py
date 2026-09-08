@@ -2,12 +2,13 @@ import struct
 
 import pytest
 
-from pymc_core.protocol.constants import MAX_PACKET_PAYLOAD, MAX_PATH_SIZE
-from pymc_core.protocol.packet_utils import (
+from openhop_core.protocol.constants import MAX_PACKET_PAYLOAD, MAX_PATH_SIZE
+from openhop_core.protocol.packet_utils import (
     PacketDataUtils,
     PacketHashingUtils,
     PacketValidationUtils,
     PathUtils,
+    coding_rate_denominator,
 )
 
 
@@ -347,3 +348,31 @@ class TestPathUtils:
         assert PathUtils.trace_payload_hash_width(2) == 4
         assert PathUtils.trace_payload_hash_width(3) == 8
         assert PathUtils.trace_payload_hash_width(0xFF) == 8
+
+
+class TestCodingRateDenominator:
+    def test_legacy_index_form(self):
+        """Legacy indices 1..4 map to denominators 5..8 (4/5..4/8)."""
+        assert coding_rate_denominator(1) == 5
+        assert coding_rate_denominator(2) == 6
+        assert coding_rate_denominator(3) == 7
+        assert coding_rate_denominator(4) == 8
+
+    def test_denominator_form_passthrough(self):
+        """Denominators 5..8 are returned unchanged."""
+        assert coding_rate_denominator(5) == 5
+        assert coding_rate_denominator(6) == 6
+        assert coding_rate_denominator(7) == 7
+        assert coding_rate_denominator(8) == 8
+
+    def test_out_of_range_clamped(self):
+        """Values outside both forms clamp into the valid 5..8 range."""
+        assert coding_rate_denominator(0) == 5
+        assert coding_rate_denominator(-3) == 5
+        assert coding_rate_denominator(9) == 8
+        assert coding_rate_denominator(255) == 8
+
+    def test_float_input_coerced(self):
+        """Float configs coerce like ints before mapping."""
+        assert coding_rate_denominator(1.0) == 5
+        assert coding_rate_denominator(5.0) == 5

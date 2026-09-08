@@ -1,16 +1,23 @@
-from pymc_core import LocalIdentity
-from pymc_core.protocol import CryptoUtils
-from pymc_core.protocol.constants import (
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
+
+from openhop_core import LocalIdentity
+from openhop_core.node.handlers.text import TextMessageHandler
+from openhop_core.protocol import CryptoUtils
+from openhop_core.protocol.constants import (
     MAX_PACKET_PAYLOAD,
+    MAX_TEXT_LEN,
     PAYLOAD_TYPE_ACK,
     PAYLOAD_TYPE_ADVERT,
+    PAYLOAD_TYPE_ANON_REQ,
     PAYLOAD_TYPE_PATH,
     PAYLOAD_TYPE_RAW_CUSTOM,
 )
-from pymc_core.protocol.identity import Identity
-from pymc_core.protocol.packet import Packet
-from pymc_core.protocol.packet_builder import PacketBuilder
-from pymc_core.protocol.packet_utils import PathUtils
+from openhop_core.protocol.identity import Identity
+from openhop_core.protocol.packet import Packet
+from openhop_core.protocol.packet_builder import PacketBuilder
+from openhop_core.protocol.packet_utils import PathUtils
 
 
 # PacketBuilder tests
@@ -25,6 +32,84 @@ def test_packet_builder_create_ack():
 
     assert ack_packet is not None
     assert ack_packet.get_payload_type() == PAYLOAD_TYPE_ACK
+    # Firmware-compatible ACKs are 6 bytes: 4-byte hash + ext-attempt + random byte
+    assert len(ack_packet.payload) == 6
+
+
+def test_calc_text_ack_hash_matches_firmware_layout():
+    """calc_text_ack_hash[:4] == sha256(timestamp || flags || text || pubkey)[:4]."""
+    import struct
+
+    identity = LocalIdentity()
+    pubkey = identity.get_public_key()
+    timestamp = 1234567890
+    flags_byte = 0x00  # TXT_TYPE_PLAIN, attempt 0
+    text = b"hello world"
+
+    frag1 = struct.pack("<I", timestamp) + bytes([flags_byte]) + text
+    expected_hash4 = CryptoUtils.sha256(frag1 + pubkey)[:4]
+
+    ack = PacketBuilder.calc_text_ack_hash(
+        pubkey, timestamp, flags_byte, text, ext_attempt=2, randomize=False
+    )
+    assert len(ack) == 6
+    assert ack[:4] == expected_hash4
+    assert ack[4] == 2  # ext-attempt byte
+    assert ack[5] == 0  # randomize=False → deterministic zero
+
+    # Randomized output keeps the same first 5 bytes, only the 6th differs
+    rand = PacketBuilder.calc_text_ack_hash(pubkey, timestamp, flags_byte, text, ext_attempt=2)
+    assert rand[:5] == ack[:5]
+
+
+def test_create_ack_from_bytes_wraps_raw_payload():
+    """create_ack_from_bytes copies raw bytes into an ACK packet payload."""
+    raw = bytes([0x78, 0x56, 0x34, 0x12, 0x00, 0xAB])
+    pkt = PacketBuilder.create_ack_from_bytes(raw)
+    assert pkt.get_payload_type() == PAYLOAD_TYPE_ACK
+    assert bytes(pkt.payload) == raw
+    # path-less by default
+    assert pkt.path_len == 0
+
+
+def test_create_ack_from_bytes_with_path():
+    """create_ack_from_bytes routes the ACK along a given out_path."""
+    raw = bytes([0x78, 0x56, 0x34, 0x12, 0x00, 0xAB])
+    out_path = bytes([0x11, 0x22])
+    out_path_len = PathUtils.encode_path_len(1, 2)
+    pkt = PacketBuilder.create_ack_from_bytes(raw, path=out_path, path_len_encoded=out_path_len)
+    assert pkt.get_payload_type() == PAYLOAD_TYPE_ACK
+    assert bytes(pkt.payload) == raw
+    assert bytes(pkt.path) == out_path
+    assert pkt.path_len == out_path_len
+
+
+def test_create_multi_ack_layout():
+    """create_multi_ack mirrors firmware createMultiAck byte layout."""
+    from openhop_core.protocol.constants import PAYLOAD_TYPE_MULTIPART
+
+    ack = bytes([0x78, 0x56, 0x34, 0x12, 0x07, 0xAB])
+    pkt = PacketBuilder.create_multi_ack(ack, remaining=1)
+    assert pkt.get_payload_type() == PAYLOAD_TYPE_MULTIPART
+    assert pkt.payload[0] == ((1 << 4) | PAYLOAD_TYPE_ACK)
+    assert bytes(pkt.payload[1:]) == ack
+    assert int.from_bytes(pkt.payload[1:5], "little") == 0x12345678
+
+    # remaining counter occupies the upper nibble
+    pkt3 = PacketBuilder.create_multi_ack(ack, remaining=3)
+    assert pkt3.payload[0] == ((3 << 4) | PAYLOAD_TYPE_ACK)
+
+
+def test_create_multi_ack_with_path():
+    """create_multi_ack carries the routing path for direct forwarding."""
+    ack = bytes([0x78, 0x56, 0x34, 0x12])
+    out_path = bytes([0x11, 0x22])
+    out_path_len = PathUtils.encode_path_len(1, 2)
+    pkt = PacketBuilder.create_multi_ack(
+        ack, remaining=1, path=out_path, path_len_encoded=out_path_len
+    )
+    assert bytes(pkt.path) == out_path
+    assert pkt.path_len == out_path_len
 
 
 def test_packet_builder_create_advert():
@@ -121,9 +206,28 @@ def test_packet_builder_create_path_return_encoded_path_len():
     assert decrypted[5] == 0xFF  # extra_type
 
 
-def test_packet_builder_create_path_return_no_encoded_uses_len_path():
-    """When path_len_encoded is None, first byte is len(path) (1-byte hash semantics)."""
-    path = [0x11, 0x22, 0x33]  # 3 bytes
+def test_packet_builder_create_path_return_requires_encoded_len_for_nonempty_path():
+    """A non-empty path without path_len_encoded is ambiguous, so it must raise.
+
+    3 bytes is either three 1-byte hashes or one 3-byte hash, and guessing
+    wrong teaches the peer a route that resolves to nobody until a flood login
+    resets it (firmware onPeerPathRecv stores the taught path verbatim).
+    """
+    with pytest.raises(ValueError, match="path_len_encoded is required"):
+        PacketBuilder.create_path_return(
+            dest_hash=0x01,
+            src_hash=0x02,
+            secret=bytes(32),
+            path=[0x11, 0x22, 0x33],
+            extra_type=0xFF,
+            extra=b"",
+            path_len_encoded=None,
+        )
+
+
+def test_packet_builder_create_path_return_one_byte_hashes_declared_explicitly():
+    """1-byte hashes still work; the caller just has to say so."""
+    path = [0x11, 0x22, 0x33]  # three 1-byte hashes
     secret = bytes(32)
     pkt = PacketBuilder.create_path_return(
         dest_hash=0x01,
@@ -132,12 +236,69 @@ def test_packet_builder_create_path_return_no_encoded_uses_len_path():
         path=path,
         extra_type=0xFF,
         extra=b"",
-        path_len_encoded=None,
+        path_len_encoded=PathUtils.encode_path_len(1, 3),
     )
     aes_key = secret[:16]
     decrypted = CryptoUtils.mac_then_decrypt(aes_key, secret, bytes(pkt.payload[2:]))
-    assert decrypted[0] == 3
+    assert PathUtils.get_path_hash_size(decrypted[0]) == 1
+    assert PathUtils.get_path_hash_count(decrypted[0]) == 3
     assert decrypted[1:4] == bytes(path)
+    # No extra payload: 0xFF dummy type followed by 4 random uniqueness bytes.
+    assert decrypted[4] == 0xFF
+    assert len(decrypted) >= 4 + 1 + 4
+
+
+def test_packet_builder_create_path_return_empty_path_needs_no_encoded_len():
+    """An empty path is unambiguous, so path_len_encoded stays optional."""
+    secret = bytes(32)
+    pkt = PacketBuilder.create_path_return(
+        dest_hash=0x01,
+        src_hash=0x02,
+        secret=secret,
+        path=[],
+        extra_type=0xFF,
+        extra=b"",
+    )
+    decrypted = CryptoUtils.mac_then_decrypt(secret[:16], secret, bytes(pkt.payload[2:]))
+    assert decrypted[0] == 0
+
+
+def test_packet_builder_create_path_return_rejects_invalid_encoded_len():
+    """An invalid encoded path_len must raise, not fall back to a byte count."""
+    with pytest.raises(ValueError, match="invalid path_len_encoded"):
+        PacketBuilder.create_path_return(
+            dest_hash=0x01,
+            src_hash=0x02,
+            secret=bytes(32),
+            path=[0x11] * 4,
+            extra_type=0xFF,
+            extra=b"",
+            path_len_encoded=0xFF,  # hash_size 4 is reserved
+        )
+
+
+def test_packet_builder_create_path_return_empty_extra_is_unique():
+    """Two identical empty-extra PATH returns must differ (random filler),
+    matching MeshCore Mesh::createPathReturn."""
+    path = [0x11, 0x22, 0x33]
+    secret = bytes(32)
+    kwargs = dict(
+        dest_hash=0x01,
+        src_hash=0x02,
+        secret=secret,
+        path=path,
+        extra=b"",
+        path_len_encoded=PathUtils.encode_path_len(1, 3),
+    )
+    a = PacketBuilder.create_path_return(**kwargs)
+    b = PacketBuilder.create_path_return(**kwargs)
+    assert bytes(a.payload) != bytes(b.payload)
+    # Both remain valid and decrypt with the shared secret.
+    for pkt in (a, b):
+        dec = CryptoUtils.mac_then_decrypt(secret[:16], secret, bytes(pkt.payload[2:]))
+        assert dec[0] == 3
+        assert dec[1:4] == bytes(path)
+        assert dec[4] == 0xFF
 
 
 def test_create_text_message_cli_data_flags_byte():
@@ -171,6 +332,233 @@ def test_create_text_message_cli_data_flags_byte():
     assert dec_p[4] == 0x01  # PLAIN: (0 << 2) | attempt 1
     assert dec_c[4] == 0x05  # CLI_DATA: (1 << 2) | attempt 1
     assert crc_plain != crc_cli
+
+
+def test_create_text_message_extended_attempt_hidden_in_tail():
+    """attempt > 3 hides the full attempt byte after the text's NUL terminator so
+    retries whose low two bits repeat still produce a unique packet (composeMsgPacket)."""
+    local = LocalIdentity()
+    other = LocalIdentity()
+    contact = type(
+        "Contact",
+        (),
+        {"public_key": other.get_public_key().hex(), "out_path": [], "out_path_len": -1},
+    )()
+    peer_pub = local.get_public_key()
+    secret = Identity(peer_pub).calc_shared_secret(other.get_private_key())
+    aes_key = secret[:16]
+
+    def _dec(p):
+        return CryptoUtils.mac_then_decrypt(aes_key, secret, bytes(p.payload[2:]))
+
+    text = "hi"
+    ts = 1000  # pin the timestamp so attempt 0 and 4 are comparable
+    pkt4, crc4 = PacketBuilder.create_text_message(
+        contact, local, text, 4, "direct", None, 0, timestamp=ts
+    )
+    dec4 = _dec(pkt4)
+    # Low two bits of attempt live in the flag byte: 4 & 3 == 0
+    assert dec4[4] == 0x00
+    # Layout: timestamp(4) + flags(1) + text + NUL + attempt
+    tail_start = 5 + len(text.encode("utf-8"))
+    assert dec4[tail_start] == 0x00  # C-string terminator
+    assert dec4[tail_start + 1] == 4  # hidden full attempt byte
+
+    # attempt <= 3 carries no tail at all -- what follows the text is AES
+    # zero-padding, which happens to look the same here.
+    pkt0, crc0 = PacketBuilder.create_text_message(
+        contact, local, text, 0, "direct", None, 0, timestamp=ts
+    )
+    dec0 = _dec(pkt0)
+    assert dec0[tail_start] == 0x00
+    assert dec0[tail_start + 1] == 0x00  # AES zero padding, not an attempt byte
+
+    # The ACK CRC is computed over timestamp+flags+text only, so attempt 0 and 4
+    # (same low bits, same text) expect the same ACK, but the packets differ.
+    assert crc0 == crc4
+    assert bytes(pkt0.payload) != bytes(pkt4.payload)
+
+    # Extended attempt shrinks the text budget by two bytes.
+    long_text = "x" * (MAX_TEXT_LEN - 1)
+    with pytest.raises(ValueError):
+        PacketBuilder.create_text_message(contact, local, long_text, 4, "direct", None, 0)
+    # The same length is still fine for attempt <= 3.
+    ok_pkt, _ = PacketBuilder.create_text_message(contact, local, long_text, 1, "direct", None, 0)
+    assert ok_pkt is not None
+
+
+@pytest.mark.parametrize(
+    "text_len,attempt,txt_type,expected_plaintext",
+    [
+        (11, 0, 0, 16),  # 5 + 11 == one whole block: the NUL would cost a second
+        (11, 0, 1, 16),
+        (27, 0, 0, 32),  # 5 + 27 == two whole blocks
+        (10, 0, 0, 15),  # not on a boundary: padding hides the difference
+        (11, 5, 0, 18),  # plain retry > 3 keeps its NUL + attempt tail
+        (11, 5, 1, 16),  # CLI has no tail at any attempt
+    ],
+)
+def test_create_text_message_body_length_matches_firmware(
+    text_len, attempt, txt_type, expected_plaintext
+):
+    """[fails pre-fix] The body ends at the text, as firmware's length does.
+
+    composeMsgPacket and sendCommandData both memcpy `text_len + 1` bytes into
+    their scratch buffer but hand createDatagram only `5 + text_len`, so the
+    C-string terminator never reaches the wire. openhop appended it anyway.
+    Usually invisible -- AES zero-padding covers it -- but when `5 + text_len`
+    is a whole number of cipher blocks the extra byte buys a whole extra block,
+    and the packet is 16 bytes longer than the one firmware would have sent.
+    """
+    local = LocalIdentity()
+    other = LocalIdentity()
+    contact = type(
+        "Contact",
+        (),
+        {"public_key": other.get_public_key().hex(), "out_path": [], "out_path_len": -1},
+    )()
+
+    pkt, _crc = PacketBuilder.create_text_message(
+        contact, local, "x" * text_len, attempt, "direct", None, txt_type, timestamp=1000
+    )
+    # payload = dest_hash(1) + src_hash(1) + MAC(2) + ciphertext, zero-padded to
+    # a 16-byte block.
+    ciphertext_len = len(pkt.payload) - 4
+    assert ciphertext_len == ((expected_plaintext + 15) // 16) * 16
+
+
+def test_create_text_message_round_trips_on_a_block_boundary():
+    """A body that exactly fills its blocks carries no NUL, and still decodes.
+
+    This is the length the terminator used to hide: with no padding left over
+    there is no zero byte after the text. It decrypts here rather than through
+    the receive handler, so it proves the *bytes*; that the handler falls back
+    on the decrypted length is proven by
+    ``test_body_with_no_terminator_decodes_and_acks`` in test_handlers.py.
+    """
+    local = LocalIdentity()
+    other = LocalIdentity()
+    contact = type(
+        "Contact",
+        (),
+        {"public_key": other.get_public_key().hex(), "out_path": [], "out_path_len": -1},
+    )()
+    secret = Identity(local.get_public_key()).calc_shared_secret(other.get_private_key())
+
+    text = "x" * 11  # 5 + 11 == 16
+    pkt, _crc = PacketBuilder.create_text_message(
+        contact, local, text, 0, "direct", None, 0, timestamp=1000
+    )
+    dec = CryptoUtils.mac_then_decrypt(secret[:16], secret, bytes(pkt.payload[2:]))
+    assert len(dec) == 16
+    assert bytes(dec[5:]).decode() == text
+    assert b"\x00" not in bytes(dec[5:])
+
+
+@pytest.mark.parametrize("txt_type", [0, 2])
+def test_create_text_message_expected_ack_matches_the_receiver(txt_type):
+    """[fails pre-fix for SIGNED_PLAIN] The sender predicts the ACK the receiver sends.
+
+    Which key salts the hash flips with the type. Plain text uses the sender's
+    on both sides -- composeMsgPacket hashes with `self_id.pub_key` and the
+    receiver answers with `from.id.pub_key`. Signed text inverts it: the
+    receiver hashes with its *own* key, so the sender has to predict with the
+    recipient's, as simple_room_server::pushPostToClient does
+    (`client->id.pub_key`). openHop used the sender's key for both, so a signed
+    send waited on an ACK that could never arrive.
+    """
+    sender = LocalIdentity()
+    receiver = LocalIdentity()
+    contact = type(
+        "Contact",
+        (),
+        {"public_key": receiver.get_public_key().hex(), "out_path": [], "out_path_len": -1},
+    )()
+
+    pkt, expected = PacketBuilder.create_text_message(
+        contact, sender, "hello", 0, "direct", None, txt_type, timestamp=1000
+    )
+
+    # What the receiving handler will actually answer with.
+    secret = Identity(sender.get_public_key()).calc_shared_secret(receiver.get_private_key())
+    dec = CryptoUtils.mac_then_decrypt(secret[:16], secret, bytes(pkt.payload[2:]))
+    handler = TextMessageHandler(receiver, MagicMock(contacts=[]), lambda *_: None, AsyncMock())
+    body = bytes(dec[9:]) if txt_type == 2 else bytes(dec[5:])
+    computed = handler._calc_ack_hash(
+        txt_type, dec, body, sender.get_public_key(), 1000, dec[4]
+    )
+
+    assert int.from_bytes(computed[:4], "little") == expected
+
+
+def test_create_text_message_body_ends_at_an_embedded_nul():
+    """[fails pre-fix] An embedded NUL ends the message, as strlen() does.
+
+    composeMsgPacket and sendCommandData both size the body with
+    `strlen(text)`, so bytes past an interior NUL are neither sent nor hashed.
+    Sending them anyway puts text on the wire no receiver will show -- ours
+    stops at the first NUL as well -- and, worse, hashes the expected ACK over
+    a span the receiver never reproduces, so send_confirmed can never fire.
+    """
+    local = LocalIdentity()
+    other = LocalIdentity()
+    contact = type(
+        "Contact",
+        (),
+        {"public_key": other.get_public_key().hex(), "out_path": [], "out_path_len": -1},
+    )()
+    secret = Identity(local.get_public_key()).calc_shared_secret(other.get_private_key())
+
+    pkt, crc = PacketBuilder.create_text_message(
+        contact, local, "a\x00b", 0, "direct", None, 0, timestamp=1000
+    )
+    dec = CryptoUtils.mac_then_decrypt(secret[:16], secret, bytes(pkt.payload[2:]))
+    assert bytes(dec[5:]).rstrip(b"\x00") == b"a"
+
+    # The ACK the sender waits for is the one the receiver will compute, which
+    # it derives from the visible text alone.
+    truncated, crc_truncated = PacketBuilder.create_text_message(
+        contact, local, "a", 0, "direct", None, 0, timestamp=1000
+    )
+    assert crc == crc_truncated
+
+
+@pytest.mark.parametrize("cli_type", [1, 3])
+def test_create_text_message_cli_types_have_no_extended_attempt_tail(cli_type):
+    """[fails pre-fix] The CLI types take sendCommandData, which has no tail.
+
+    composeMsgPacket appends NUL + the full attempt byte for attempt > 3 so
+    retries whose low two bits repeat still hash uniquely; sendCommandData
+    builds `5 + text_len` and stops, because a CLI message earns no delivery ACK
+    and so has no repeated attempt hash to disambiguate. Emitting the tail
+    anyway puts a byte on the wire firmware never sends, and drags the
+    MAX_TEXT_LEN-2 budget along with it.
+    """
+    local = LocalIdentity()
+    other = LocalIdentity()
+    contact = type(
+        "Contact",
+        (),
+        {"public_key": other.get_public_key().hex(), "out_path": [], "out_path_len": -1},
+    )()
+    secret = Identity(local.get_public_key()).calc_shared_secret(other.get_private_key())
+
+    text = "hi"
+    pkt, _crc = PacketBuilder.create_text_message(
+        contact, local, text, 4, "direct", None, cli_type, timestamp=1000
+    )
+    dec = CryptoUtils.mac_then_decrypt(secret[:16], secret, bytes(pkt.payload[2:]))
+    assert dec[4] == (cli_type << 2)  # 4 & 3 == 0, so only the type shows
+    tail_start = 5 + len(text.encode("utf-8"))
+    assert dec[tail_start] == 0x00  # C-string terminator
+    assert dec[tail_start + 1] == 0x00  # AES zero padding, not a hidden attempt
+
+    # ...and the shrunken budget goes with it: a length firmware accepts here.
+    long_text = "x" * (MAX_TEXT_LEN - 1)
+    ok_pkt, _ = PacketBuilder.create_text_message(
+        contact, local, long_text, 4, "direct", None, cli_type
+    )
+    assert ok_pkt is not None
 
 
 def test_create_text_message_truncated_path_path_len_consistency():
@@ -265,3 +653,273 @@ def test_truncated_path_packet_round_trip():
     assert ok
     assert pkt2.get_path_byte_len() == len(pkt2.path)
     assert pkt2.get_path_byte_len() == 63
+
+
+def _make_contact(other, out_path=b"", out_path_len=-1):
+    return type(
+        "Contact",
+        (),
+        {
+            "public_key": other.get_public_key().hex(),
+            "out_path": out_path,
+            "out_path_len": out_path_len,
+        },
+    )()
+
+
+def _decrypt_anon(pkt, sender_local, recipient_local):
+    """Decrypt an ANON_REQ packet: payload = dest_hash(1)+sender_pubkey(32)+cipher."""
+    assert pkt.payload[1:33] == bytes(sender_local.get_public_key())
+    cipher = bytes(pkt.payload[33:])
+    secret = Identity(sender_local.get_public_key()).calc_shared_secret(
+        recipient_local.get_private_key()
+    )
+    return CryptoUtils.mac_then_decrypt(secret[:16], secret, cipher)
+
+
+def test_create_anon_request_is_anon_payload_type_no_subtype_prefix():
+    """Regression: anon requests must be PAYLOAD_TYPE_ANON_REQ with the client's
+    sub-type byte at offset 4 (after the 4-byte timestamp) - NOT a PAYLOAD_TYPE_REQ
+    with 0x07 prepended (which repeaters read as REQ_TYPE_GET_OWNER_INFO)."""
+    local = LocalIdentity()
+    other = LocalIdentity()
+    contact = _make_contact(other, out_path=b"", out_path_len=0)  # zero-hop neighbour
+    # ANON_REQ_TYPE_REGIONS (0x01) + reply-path byte (0 = empty path)
+    req_data = bytes([0x01, 0x00])
+    pkt, ts = PacketBuilder.create_anon_request(contact, local, req_data)
+
+    assert pkt.get_payload_type() == PAYLOAD_TYPE_ANON_REQ
+    plaintext = _decrypt_anon(pkt, local, other)
+    assert int.from_bytes(plaintext[:4], "little") == ts
+    # sub-type byte sits immediately after the timestamp, with no 0x07 prefix
+    assert plaintext[4] == 0x01
+    # (trailing bytes are AES block padding, ignored by the responder)
+    assert plaintext[4 : 4 + len(req_data)] == req_data
+
+
+def test_create_anon_request_zero_hop_is_direct():
+    """out_path_len == 0 (zero-hop direct neighbour) must route DIRECT so the
+    firmware regions handler (which requires isRouteDirect()) answers."""
+    local = LocalIdentity()
+    other = LocalIdentity()
+    contact = _make_contact(other, out_path=b"", out_path_len=0)
+    pkt, _ = PacketBuilder.create_anon_request(contact, local, bytes([0x01, 0x00]))
+    assert pkt.is_route_direct()
+    assert not pkt.is_route_flood()
+
+
+def test_create_anon_request_unknown_path_is_flood():
+    """out_path_len == -1 (unknown) must route FLOOD."""
+    local = LocalIdentity()
+    other = LocalIdentity()
+    contact = _make_contact(other, out_path=b"", out_path_len=-1)
+    pkt, _ = PacketBuilder.create_anon_request(contact, local, bytes([0x01, 0x00]))
+    assert pkt.is_route_flood()
+
+
+def test_create_protocol_request_zero_hop_is_direct():
+    """out_path_len == 0 (zero-hop direct neighbour, empty path) must route DIRECT.
+
+    After login establishes the path, stats/telemetry requests must use sendDirect
+    so the firmware repeater answers directly instead of flooding (matches firmware
+    BaseChatMesh::sendRequest and create_anon_request)."""
+    local = LocalIdentity()
+    other = LocalIdentity()
+    contact = _make_contact(other, out_path=b"", out_path_len=0)
+    pkt, _ = PacketBuilder.create_protocol_request(contact, local, 0x01, b"")
+    assert pkt.is_route_direct()
+    assert not pkt.is_route_flood()
+    # Zero-hop direct packet carries an empty path (firmware sendDirect(pkt, path, 0)).
+    assert pkt.path_len == 0
+
+
+def test_create_protocol_request_unknown_path_is_flood():
+    """out_path_len == -1 (unknown) must route FLOOD."""
+    local = LocalIdentity()
+    other = LocalIdentity()
+    contact = _make_contact(other, out_path=b"", out_path_len=-1)
+    pkt, _ = PacketBuilder.create_protocol_request(contact, local, 0x01, b"")
+    assert pkt.is_route_flood()
+
+
+def test_create_protocol_request_can_force_flood_for_known_path():
+    """A request may explicitly flood without changing the stored contact path."""
+    local = LocalIdentity()
+    other = LocalIdentity()
+    path = b"\x01\x02\x03"
+    contact = _make_contact(other, out_path=path, out_path_len=3)
+    pkt, _ = PacketBuilder.create_protocol_request(contact, local, 0x01, b"", route_type="flood")
+
+    assert pkt.is_route_flood()
+    assert pkt.path_len == 0
+    assert bytes(pkt.path) == b""
+    assert contact.out_path_len == 3
+    assert contact.out_path == path
+
+
+def test_create_telem_request_honors_explicit_route_type():
+    """Telemetry requests use the same explicit routing override as protocol requests."""
+    local = LocalIdentity()
+    other = LocalIdentity()
+    contact = _make_contact(other, out_path=b"\x01\x02\x03", out_path_len=3)
+
+    pkt, _ = PacketBuilder.create_telem_request(contact, local, route_type="flood")
+
+    assert pkt.is_route_flood()
+    assert pkt.path_len == 0
+    assert bytes(pkt.path) == b""
+
+
+def test_advert_timestamp_uses_wall_time_not_the_unique_request_clock():
+    """Adverts carry plain wall time (firmware Mesh::createAdvert uses
+    getCurrentTime, not getCurrentTimeUnique). If the advert shared the
+    strictly-increasing request clock, a burst of requests would inflate the
+    advert timestamp into the future and peers would drop this node's later
+    wall-time adverts as replays until real time caught up."""
+    import struct
+    from unittest.mock import patch
+
+    with patch("time.time", return_value=1_700_000_000.0):
+        # Inflate the shared request clock well past the frozen wall time.
+        for _ in range(5):
+            PacketBuilder._get_timestamp()
+        assert PacketBuilder._last_unique_timestamp > 1_700_000_000
+
+        identity = LocalIdentity()
+        pkt = PacketBuilder.create_advert(identity, "TestNode", 1)
+
+        # Advert payload: pubkey(32) + timestamp(4 LE) + signature + appdata.
+        advert_ts = struct.unpack("<I", bytes(pkt.payload[32:36]))[0]
+        assert advert_ts == 1_700_000_000
+
+
+def test_advert_timestamps_follow_the_wall_clock():
+    """Two adverts in successive seconds carry those wall-clock seconds; two in
+    the same second may carry the same value (getCurrentTime semantics)."""
+    import struct
+    from unittest.mock import patch
+
+    identity = LocalIdentity()
+    stamps = []
+    for now in (2_000_000_000.0, 2_000_000_000.0, 2_000_000_001.0):
+        with patch("time.time", return_value=now):
+            pkt = PacketBuilder.create_advert(identity, "TestNode", 1)
+        stamps.append(struct.unpack("<I", bytes(pkt.payload[32:36]))[0])
+
+    assert stamps == [2_000_000_000, 2_000_000_000, 2_000_000_001]
+
+
+def test_get_timestamp_is_strictly_monotonic_within_same_second():
+    """Back-to-back tags must strictly increase even within one wall-clock second.
+
+    Firmware repeaters drop a REQ/login whose timestamp is not strictly greater
+    than the client's last stored timestamp (replay guard). Mirrors firmware
+    getCurrentTimeUnique so a login + immediate stats request don't collide and
+    get silently ignored."""
+    ts = [PacketBuilder._get_timestamp() for _ in range(5)]
+    assert ts == sorted(ts)
+    assert len(set(ts)) == 5  # all unique
+    assert all(b == a + 1 or b > a for a, b in zip(ts, ts[1:]))
+
+
+def test_login_then_stats_tags_strictly_increase():
+    """A login followed immediately by a stats request must carry strictly
+    increasing timestamps so the firmware repeater accepts the stats REQ."""
+    local = LocalIdentity()
+    other = LocalIdentity()
+    contact = _make_contact(other, out_path=b"", out_path_len=0)
+    login_pkt = PacketBuilder.create_login_packet(
+        contact=contact, local_identity=local, password="x"
+    )
+    _, stats_ts = PacketBuilder.create_protocol_request(contact, local, 0x01, b"")
+    login_ts = int.from_bytes(_decrypt_anon(login_pkt, local, other)[:4], "little")
+    assert stats_ts > login_ts
+
+
+def test_create_text_message_uses_explicit_timestamp():
+    """An explicit timestamp is used verbatim (the host msg_timestamp), so retries of the
+    same message keep a stable timestamp — mirroring firmware sendMessage."""
+    import struct
+
+    sender = LocalIdentity()
+    recipient = LocalIdentity()
+    contact = _make_contact(recipient)
+    ts = 1700000000
+    attempt = 2
+    text = "retry me"
+
+    _, crc = PacketBuilder.create_text_message(
+        contact, sender, text, attempt=attempt, message_type="direct", timestamp=ts
+    )
+    flags_byte = attempt & 0x03
+    expected = int.from_bytes(
+        CryptoUtils.sha256(
+            struct.pack("<I", ts)
+            + bytes([flags_byte])
+            + text.encode("utf-8")
+            + sender.get_public_key()
+        )[:4],
+        "little",
+    )
+    assert crc == expected
+
+    # Same timestamp + attempt + text => identical ACK CRC (stable retry identity).
+    _, crc2 = PacketBuilder.create_text_message(
+        contact, sender, text, attempt=attempt, message_type="direct", timestamp=ts
+    )
+    assert crc2 == crc
+
+    # No explicit timestamp => a fresh one is minted => different CRC.
+    _, crc3 = PacketBuilder.create_text_message(
+        contact, sender, text, attempt=attempt, message_type="direct"
+    )
+    assert crc3 != crc
+
+
+def _decrypt_group_content(pkt: Packet, secret: bytes) -> bytes:
+    """Return the '<sender>: <text>' content of a group datagram payload."""
+    # Payload layout: channel_hash (1) + MAC (2) + ciphertext
+    ciphertext = bytes(pkt.payload[3:])
+    plaintext = CryptoUtils._aes_decrypt(secret[:16], ciphertext)
+    # Skip timestamp (4) + flags (1); strip AES zero-padding like receivers do.
+    return plaintext[5:].rstrip(b"\x00")
+
+
+def test_create_group_datagram_truncates_content_to_max_text_len():
+    """Firmware sendGroupMessage caps '<sender>: <text>' at MAX_TEXT_LEN bytes."""
+    secret = b"\x11" * 16
+    channels = [{"name": "general", "secret": secret}]
+    sender = "Alice"
+
+    pkt = PacketBuilder.create_group_datagram(
+        "general", LocalIdentity(), "x" * 500, sender, channels
+    )
+
+    content = _decrypt_group_content(pkt, secret)
+    assert len(content) == MAX_TEXT_LEN
+    prefix = f"{sender}: "
+    assert content.decode("utf-8") == prefix + "x" * (MAX_TEXT_LEN - len(prefix))
+
+
+def test_create_group_datagram_short_message_not_truncated():
+    secret = b"\x11" * 16
+    channels = [{"name": "general", "secret": secret}]
+
+    pkt = PacketBuilder.create_group_datagram(
+        "general", LocalIdentity(), "hello", "Alice", channels
+    )
+
+    assert _decrypt_group_content(pkt, secret) == b"Alice: hello"
+
+
+def test_create_group_datagram_truncation_keeps_utf8_valid():
+    """A multi-byte char split at the byte cap is dropped, not corrupted."""
+    secret = b"\x11" * 16
+    channels = [{"name": "general", "secret": secret}]
+
+    # Prefix "A: " is 3 bytes; 157 remaining is odd, so a 2-byte char straddles the cut.
+    pkt = PacketBuilder.create_group_datagram("general", LocalIdentity(), "é" * 200, "A", channels)
+
+    content = _decrypt_group_content(pkt, secret)
+    assert len(content) <= MAX_TEXT_LEN
+    assert content.decode("utf-8") == "A: " + "é" * ((MAX_TEXT_LEN - 3) // 2)

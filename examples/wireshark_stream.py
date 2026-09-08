@@ -47,7 +47,7 @@ async def main(ip, port):
     # Create radio and dispatcher directly (no default handlers)
     from common import create_radio
 
-    from pymc_core.node.dispatcher import Dispatcher
+    from openhop_core.node.dispatcher import Dispatcher
 
     radio = create_radio("waveshare")
     radio.begin()

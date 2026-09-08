@@ -1,5 +1,5 @@
 """
-Offline tests for the shared pymc_usb wire-protocol primitives.
+Offline tests for the shared openHop Modem wire-protocol primitives.
 
 Verifies CRC-16/CCITT-FALSE (poly 0x1021, init 0xFFFF, no reflect,
 no xor-out) and frame layout produced by `crc16_ccitt` / `build_frame`
@@ -16,14 +16,13 @@ import struct
 
 import pytest
 
-from pymc_core.hardware.protocol_constants import (
+from openhop_core.hardware.protocol_constants import (
     CMD_PING,
     CMD_TX_REQUEST,
     PROTO_SYNC,
     build_frame,
     crc16_ccitt,
 )
-
 
 # ───────────────────────── CRC ─────────────────────────────────────
 

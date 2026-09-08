@@ -1,0 +1,12 @@
+[flake8]
+max-line-length = 100
+extend-ignore = E203,E231,W503
+exclude =
+    .git,
+    .tox,
+    __pycache__,
+    dist,
+    *.egg-info,
+    examples/,
+    src/openhop_core/hardware/lora/,
+    scripts/test_modem_crypto.py

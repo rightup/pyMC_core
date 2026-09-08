@@ -21,11 +21,18 @@ import asyncio
 import time
 from typing import Dict, Optional
 
-from common import create_mesh_node
+from common import RADIO_TYPES, create_mesh_node
 
-from pymc_core.node.handlers.login_server import LoginServerHandler
-from pymc_core.protocol import Identity, LocalIdentity
-from pymc_core.protocol.constants import PUB_KEY_SIZE
+from openhop_core.node.handlers.login_server import LoginServerHandler
+from openhop_core.protocol import Identity, LocalIdentity
+from openhop_core.protocol.constants import (
+    PERM_ACL_ADMIN,
+    PERM_ACL_GUEST,
+    PERM_ACL_ROLE_MASK,
+    PUB_KEY_SIZE,
+    acl_is_admin,
+    acl_role,
+)
 
 
 def create_mesh_node_with_identity(
@@ -39,12 +46,12 @@ def create_mesh_node_with_identity(
     # Set up logging (copied from common.py)
     logger = logging.getLogger(__name__)
 
-    # Add the src directory to the path so we can import pymc_core
+    # Add the src directory to the path so we can import openhop_core
     sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
     from common import create_radio
 
-    from pymc_core.node.node import MeshNode
+    from openhop_core.node.node import MeshNode
 
     logger.info(f"Creating mesh node with name: {node_name} using {radio_type} radio")
 
@@ -100,10 +107,11 @@ EXAMPLE_ADMIN_PASSWORD = "admin123"
 EXAMPLE_GUEST_PASSWORD = "guest123"
 # =============================================================================
 
-# Permission levels
-PERM_ACL_GUEST = 0x01
-PERM_ACL_ADMIN = 0x02
-PERM_ACL_ROLE_MASK = 0x03
+# Permission levels come from openhop_core.protocol.constants, which mirrors
+# firmware ClientACL.h: the role is the low two bits of the permissions byte
+# (GUEST=0, READ_ONLY=1, READ_WRITE=2, ADMIN=3). Do not redefine them here —
+# a local copy on different numbering is exactly what made OpenHop admins
+# decode as read-write in stock MeshCore clients.
 
 
 class ClientInfo:
@@ -121,11 +129,11 @@ class ClientInfo:
 
     def is_admin(self) -> bool:
         """Check if client has admin permissions."""
-        return (self.permissions & PERM_ACL_ROLE_MASK) == PERM_ACL_ADMIN
+        return acl_is_admin(self.permissions)
 
     def is_guest(self) -> bool:
         """Check if client has guest permissions."""
-        return (self.permissions & PERM_ACL_ROLE_MASK) == PERM_ACL_GUEST
+        return acl_role(self.permissions) == PERM_ACL_GUEST
 
 
 class ClientACL:
@@ -262,7 +270,7 @@ async def run_login_server(
         use_hardcoded_identity: Use hardcoded identity for easy testing
     """
     print("=" * 60)
-    print("PyMC Core - Login Server Example")
+    print("openHop Core - Login Server Example")
     print("=" * 60)
     print(f"Admin Password: {admin_password}")
     print(f"Guest Password: {guest_password if guest_password else '<disabled>'}")
@@ -289,11 +297,25 @@ async def run_login_server(
     # Create ACL for managing authenticated clients
     acl = ClientACL(max_clients=32, admin_password=admin_password, guest_password=guest_password)
 
+    def get_out_path(client_identity: Identity):
+        client = acl.get_client(client_identity.get_public_key())
+        if client is None or client.out_path_len < 0:
+            return None
+        return (bytes(client.out_path), client.out_path_len)
+
+    def clear_out_path(client_identity: Identity):
+        client = acl.get_client(client_identity.get_public_key())
+        if client is not None:
+            client.out_path_len = -1
+            client.out_path = bytearray()
+
     # Create login server handler with authentication callback
     login_handler = LoginServerHandler(
         local_identity=identity,
         log_fn=lambda msg: print(msg),
         authenticate_callback=acl.authenticate_client,  # Delegate authentication to ACL
+        get_out_path=get_out_path,
+        clear_out_path=clear_out_path,
     )
 
     # Set up packet sending callback
@@ -381,7 +403,7 @@ def main():
     )
     parser.add_argument(
         "--radio-type",
-        choices=["waveshare", "uconsole", "meshadv-mini", "kiss-tnc", "kiss-modem"],
+        choices=RADIO_TYPES,
         default="waveshare",
         help="Radio hardware type (default: waveshare)",
     )
