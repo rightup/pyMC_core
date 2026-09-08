@@ -36,6 +36,9 @@ from .handlers import (
 
 ACK_TIMEOUT = 5.0  # seconds to wait for an ACK
 
+# Distinguish direct processing from a callback that captured an unknown ingress.
+_RX_RADIO_ID_UNSET = object()
+
 # Flood reception-quality delay bounds (MeshCore Dispatcher::checkRecv):
 # delays under the threshold process immediately, longer ones are capped.
 MIN_RX_DELAY_MS = 50.0
@@ -493,11 +496,25 @@ class Dispatcher:
         """Called by the radio when a packet comes in. rssi/snr are per-packet when provided."""
         if not self._rx_enabled:
             return
+        # The fabric's legacy callback is synchronous: capture before scheduling,
+        # while last_rx_radio_id still describes this reception.
+        rx_radio_id = self._get_rx_radio_id()
         try:
             loop = asyncio.get_running_loop()
-            loop.create_task(self._process_received_packet(data, rssi, snr))
+            loop.create_task(
+                self._process_received_packet(data, rssi, snr, rx_radio_id=rx_radio_id)
+            )
         except RuntimeError:
             self._log("No event loop running, cannot process received packet")
+
+    def _get_rx_radio_id(self) -> Optional[str]:
+        """Read the current ingress from a radio or its fabric adapter."""
+        rx_radio_id = getattr(self.radio, "last_rx_radio_id", None)
+        if rx_radio_id is None:
+            fabric = getattr(self.radio, "fabric", None)
+            if fabric is not None:
+                rx_radio_id = getattr(fabric, "last_rx_radio_id", None)
+        return rx_radio_id
 
     def calc_rx_delay(self, score: float, air_time_ms: float) -> float:
         """Reception-quality delay in ms before a flood packet is processed.
@@ -541,8 +558,14 @@ class Dispatcher:
         data: bytes,
         rssi: Optional[int] = None,
         snr: Optional[float] = None,
+        *,
+        rx_radio_id: Any = _RX_RADIO_ID_UNSET,
     ) -> None:
         """Process received packet. rssi/snr are per-packet when provided."""
+        # Direct callers retain the legacy lookup, but snapshot before any await.
+        # An explicitly captured None must not pick up a later reception's id.
+        if rx_radio_id is _RX_RADIO_ID_UNSET:
+            rx_radio_id = self._get_rx_radio_id()
         # Notify raw RX subscribers so clients can track repeats
         if rssi is not None:
             rssi_val = rssi
@@ -582,11 +605,6 @@ class Dispatcher:
         pkt._rssi = rssi if rssi is not None else self.radio.get_last_rssi()
         pkt._snr = snr if snr is not None else self.radio.get_last_snr()
         # Multi-radio: stamp which fabric radio delivered this frame (if known).
-        rx_radio_id = getattr(self.radio, "last_rx_radio_id", None)
-        if rx_radio_id is None:
-            fabric = getattr(self.radio, "fabric", None)
-            if fabric is not None:
-                rx_radio_id = getattr(fabric, "last_rx_radio_id", None)
         if rx_radio_id is not None:
             pkt._rx_radio_id = rx_radio_id
 
