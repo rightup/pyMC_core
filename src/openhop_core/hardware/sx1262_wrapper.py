@@ -593,18 +593,17 @@ class SX1262Radio(LoRaRadio):
                         callback_packet_data = None
                         try:
                             async with self._rx_lock:
-                                # Use the IRQ status stored by the interrupt handler
-                                irqStat = self._last_irq_status
-
-                                # Claim and clear the corresponding software latch bits here
-                                # so pre-TX/CAD drain cannot consume the same RX terminal event.
-                                consumed_latch_mask = irqStat & (
+                                # Claim the latched packet-bearing RX bits under the RX
+                                # lock: _last_irq_status may already have been overwritten
+                                # by a later PREAMBLE_DETECTED/HEADER_VALID, and claiming
+                                # here stops the pre-TX/CAD drain consuming the same event.
+                                claimed_rx_irq = self._pending_rx_irq_status & (
                                     self.lora.IRQ_RX_DONE
                                     | self.lora.IRQ_CRC_ERR
                                     | self.lora.IRQ_HEADER_ERR
                                 )
-                                if consumed_latch_mask:
-                                    self._pending_rx_irq_status &= ~consumed_latch_mask
+                                self._pending_rx_irq_status &= ~claimed_rx_irq
+                                irqStat = claimed_rx_irq or self._last_irq_status
 
                                 if irqStat & self.lora.IRQ_CRC_ERR:
                                     self.crc_error_count += 1
@@ -1508,7 +1507,6 @@ class SX1262Radio(LoRaRadio):
                 if not tx_ok:
                     raise RuntimeError("TX completion timeout")
 
-                self._tx_buffer_busy = False
                 self._finalize_transmission()
 
                 # Trigger TX LED
@@ -1528,6 +1526,8 @@ class SX1262Radio(LoRaRadio):
                 logger.error(f"[TX] Send failed: {e}")
                 raise
             finally:
+                # Never leave the TX buffer marked busy: it gates RX wakeups.
+                self._tx_buffer_busy = False
                 # Always leave radio in RX continuous mode after TX
                 await self._restore_rx_mode()
 

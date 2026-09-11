@@ -606,6 +606,27 @@ class TestTransmissionLifecycle:
             await radio.send(b"data")
         mock_lora.request.assert_called_with(mock_lora.RX_CONTINUOUS)
 
+    async def test_tx_buffer_busy_cleared_on_tx_timeout(self, radio):
+        radio.perform_cad = AsyncMock(return_value=False)
+        radio._wait_for_transmission_complete = AsyncMock(return_value=False)
+        with pytest.raises(RuntimeError):
+            await radio.send(b"data")
+        assert radio._tx_buffer_busy is False
+
+    async def test_tx_buffer_busy_cleared_when_tx_raises(self, radio):
+        radio.perform_cad = AsyncMock(return_value=False)
+        radio._wait_for_transmission_complete = AsyncMock(
+            side_effect=OSError("bus error")
+        )
+        with pytest.raises(OSError, match="bus error"):
+            await radio.send(b"data")
+        assert radio._tx_buffer_busy is False
+
+    async def test_tx_buffer_busy_cleared_on_success(self, radio, mock_lora):
+        _make_tx_succeed(radio, mock_lora)
+        await radio.send(b"data")
+        assert radio._tx_buffer_busy is False
+
     async def test_execute_transmission_busy_forever_returns_false(
         self, radio, mock_lora
     ):
@@ -1410,6 +1431,39 @@ class TestEventOrdering:
         task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await task
+
+    async def test_rx_done_survives_later_progress_irq_before_rx_task_runs(
+        self, radio, mock_lora
+    ):
+        """A PREAMBLE/HEADER_VALID IRQ must not steal the latched RX_DONE event."""
+        received = []
+        radio.set_rx_callback(received.append)
+
+        mock_lora.getRxBufferStatus.return_value = (4, 0x80)
+        mock_lora.readBuffer.return_value = list(b"test")
+
+        mock_lora.getIrqStatus.return_value = IRQ_RX_DONE
+        radio._handle_interrupt()
+
+        # A new reception starts before the async RX task gets scheduled; this
+        # overwrites _last_irq_status but must not lose the latched RX_DONE.
+        mock_lora.getIrqStatus.return_value = IRQ_PREAMBLE_DETECTED | IRQ_HEADER_VALID
+        radio._handle_interrupt()
+        assert radio._last_irq_status == IRQ_PREAMBLE_DETECTED | IRQ_HEADER_VALID
+        assert radio._pending_rx_irq_status & IRQ_RX_DONE
+
+        radio._rx_done_event.set()
+        task = asyncio.get_running_loop().create_task(radio._rx_irq_background_task())
+        try:
+            await _wait_condition(lambda: received == [b"test"], timeout=1.0)
+        finally:
+            radio._initialized = False
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
+        # The latch must not remain stale once the event has been consumed.
+        assert radio._pending_rx_irq_status == 0
 
     async def test_standalone_cad_acquires_tx_lock_before_pending_rx_drain(
         self, radio, mock_lora
