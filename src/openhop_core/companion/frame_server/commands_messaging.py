@@ -8,6 +8,7 @@ import struct
 from ...protocol.cayenne_lpp import TELEM_CHANNEL_SELF, encode_voltage
 from ...protocol.constants import TELEM_PERM_BASE, TELEM_PERM_ENVIRONMENT, TELEM_PERM_LOCATION
 from ...protocol.packet_utils import PathUtils
+from ..base_config import normalize_flood_scope_key
 from ..constants import (
     ERR_CODE_BAD_STATE,
     ERR_CODE_ILLEGAL_ARG,
@@ -212,7 +213,6 @@ class _MessagingCommandsMixin:
             return
         channel_idx = data[1]
         msg_timestamp = struct.unpack("<I", data[2:6])[0]
-        scope_key = data[6:OPENHOP_SCOPED_SEND_HEADER_LEN]
         # Trailing NULs are the C-string convention command 3 already accepts;
         # an *embedded* NUL would be silently truncated by such a client, so the
         # extension rejects it rather than sending something else's bytes.
@@ -227,6 +227,16 @@ class _MessagingCommandsMixin:
             # afford to tell the client its bytes were wrong.
             self._write_err(ERR_CODE_ILLEGAL_ARG)
             return
+        # Validated before the channel lookup so that every malformed argument
+        # answers ILLEGAL_ARG. Deferring it to the bridge would let a frame that
+        # is bad in two ways at once (unknown channel *and* a null key) report
+        # NOT_FOUND, telling the client to fix the channel when the key is
+        # wrong too.
+        try:
+            scope_key = normalize_flood_scope_key(data[6:OPENHOP_SCOPED_SEND_HEADER_LEN])
+        except ValueError:
+            self._write_err(ERR_CODE_ILLEGAL_ARG)
+            return
         if self.bridge.get_channel(channel_idx) is None:
             self._write_err(ERR_CODE_NOT_FOUND)
             return
@@ -238,9 +248,8 @@ class _MessagingCommandsMixin:
                 flood_scope_key=scope_key,
             )
         except ValueError:
-            # The key is 16 bytes by construction above, so in practice this is
-            # the reserved all-zero key; the catch stays broad because the
-            # bridge owns key validation and may grow further rules.
+            # Already validated above; kept because the bridge owns key policy
+            # and may grow rules this handler does not know about.
             self._write_err(ERR_CODE_ILLEGAL_ARG)
             return
         except TypeError:

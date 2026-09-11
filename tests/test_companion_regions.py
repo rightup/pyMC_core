@@ -804,16 +804,25 @@ class TestExplicitScopeOnBridge:
         release.set()
         assert all(await asyncio.gather(*tasks))
 
-        by_code = {p.transport_codes[0] for p in sent}
         assert len(sent) == 3
-        assert len(by_code) == 3, "concurrent sends shared a scope"
         for pkt in sent:
             assert pkt.get_route_type() == ROUTE_TYPE_TRANSPORT_FLOOD
-        expected = {
-            calc_transport_code(k, p)
-            for k, p in zip((usa, europe, get_auto_key_for("#nl-li")), sent)
-        }
-        assert by_code == expected
+
+        # Match each packet to the key that explains its code rather than to
+        # the key at its position: completion order is not send order, so
+        # zipping the two would pass on a mismatch and fail on a correct run.
+        keys = {"usa": usa, "europe": europe, "node": get_auto_key_for("#nl-li")}
+        matched = []
+        for pkt in sent:
+            owners = [
+                name
+                for name, key in keys.items()
+                if calc_transport_code(key, pkt) == pkt.transport_codes[0]
+            ]
+            assert len(owners) == 1, f"packet matched {owners or 'no'} key(s)"
+            matched.append(owners[0])
+
+        assert sorted(matched) == ["europe", "node", "usa"], "concurrent sends shared a scope"
 
     @pytest.mark.asyncio
     async def test_cancelled_send_leaves_no_residue(self):
@@ -849,3 +858,37 @@ class TestExplicitScopeOnBridge:
         ok = await bridge.send_channel_message(0, "hello", flood_scope_key=get_auto_key_for("#USA"))
 
         assert ok is False
+
+
+class TestTrailingNulDivergence:
+    """Pin the one place text handling departs from firmware byte-for-byte.
+
+    Firmware's command 3 passes the client's byte count straight into
+    ``sendGroupMessage`` and encrypts any trailing NULs with it. openHop's
+    *frame handlers* strip them first -- both command 3 and the scoped
+    extension -- so for a padded frame the two stacks encrypt different lengths.
+
+    ``send_channel_message`` itself does not strip: it encrypts whatever string
+    it is handed, which is what this test shows. Combined with
+    ``test_openhop_scoped_send_strips_trailing_nuls`` in the frame-server suite
+    (a padded frame reaches the bridge as ``"hello"``), that pins the whole
+    divergence: openHop emits the shorter form where firmware emits the longer.
+
+    The decrypted string matches either way, so interoperability is unaffected
+    -- but "identical RF bytes" holds only for text without trailing NULs.
+    """
+
+    @pytest.mark.asyncio
+    async def test_send_api_encrypts_trailing_nuls_frame_layer_strips_them(self):
+        key = get_auto_key_for("#USA")
+        bare = await _send_via_radio(
+            _scoped_radio_companion(), 0, "hi", 1700000000, flood_scope_key=key
+        )
+        padded = await _send_via_radio(
+            _scoped_radio_companion(), 0, "hi\x00\x00", 1700000000, flood_scope_key=key
+        )
+
+        # Core strips, so the two are the same packet; firmware would emit a
+        # longer ciphertext for the padded one.
+        assert bytes(padded.get_payload()) != bytes(bare.get_payload())
+        assert len(padded.get_payload()) > len(bare.get_payload())

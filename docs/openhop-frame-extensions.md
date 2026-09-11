@@ -76,7 +76,7 @@ unrecognised marker as "no extensions", never as "close enough".
 Sends one channel text message under a caller-supplied transport key, whatever
 flood scope the device itself is configured for.
 
-Request payload (23–176 bytes):
+Request payload (24–176 bytes):
 
 | Offset | Size | Value |
 | --- | ---: | --- |
@@ -87,8 +87,9 @@ Request payload (23–176 bytes):
 | 7 | 16 | MeshCore transport key, exact bytes |
 | 23 | 1–153 | message text, UTF-8 |
 
-The whole payload is capped at `MAX_FRAME_SIZE` (176), leaving at most 153 text
-bytes. Text beyond what a packet holds is truncated by the shared send path on
+The fixed part occupies offsets 0–22, so the smallest complete request is 24
+bytes: 23 of header plus at least one text byte. The whole payload is capped at
+`MAX_FRAME_SIZE` (176), leaving at most 153 text bytes. Text beyond what a packet holds is truncated by the shared send path on
 exactly firmware's terms (see "RF output" below), so a client that stays under
 153 bytes is not guaranteed the whole message arrives — the cap is the frame
 limit, not the message limit.
@@ -107,9 +108,17 @@ scoped and plain sends alike.
 
 The frame is rejected with `ERR_CODE_ILLEGAL_ARG` when:
 
-- the payload is shorter than the 23-byte minimum, or longer than 176;
+- the payload is shorter than the 24-byte minimum;
 - the text is empty, contains an embedded NUL, or is not valid UTF-8;
 - the transport key is not exactly 16 bytes, or is all zeros.
+
+A payload longer than `MAX_FRAME_SIZE` does **not** get an error frame on the
+TCP transport: the frame reader rejects the length prefix and closes the
+connection before any handler runs, so the client sees a disconnect. (The
+handler carries the same check for other callers, and firmware transports are
+no more consistent here — the Wi-Fi interface skips an oversized frame while
+the Arduino serial one truncates it.) Clients should treat 176 as a hard limit
+rather than something to probe.
 
 Trailing NUL bytes on the text are accepted and stripped, matching command 3's
 C-string convention. An *embedded* NUL is refused rather than silently accepted,
@@ -118,9 +127,12 @@ since a client that produced one would itself read the message back truncated.
 All-zero keys are refused rather than read as MeshCore's
 `TransportKey::isNull()` ("send plain flood"). An explicit per-message override
 has no reason to carry the null key, so zeros are much likelier to be an
-uninitialised buffer than a deliberate request. To send unscoped, either omit
-the override (use plain command 3) or set the device unscoped with
-`CMD_SET_FLOOD_SCOPE` mode 1.
+uninitialised buffer than a deliberate request. Note the limitation this leaves: there is no per-message
+way to force *unscoped*. Omitting the override runs the node's own resolver,
+which sends unscoped only when the node has no transient or default scope; the
+sole way to guarantee a plain flood is `CMD_SET_FLOOD_SCOPE` mode 1, which
+changes sticky device state. Say so rather than implying the two are
+equivalent.
 
 ### Deriving the key
 
@@ -150,7 +162,8 @@ get_auto_key_for("#USA") != get_auto_key_for("#usa")   # True
 
 ## RF output
 
-A scoped send produces exactly what MeshCore emits for a scoped group text:
+A scoped send produces what MeshCore emits for a scoped group text, given the
+same message text:
 
 - the `GRP_TXT` payload is built and encrypted normally — same channel hash,
   same MAC, same `"<sender>: "` prefix, same firmware-compatible truncation of
@@ -161,6 +174,14 @@ A scoped send produces exactly what MeshCore emits for a scoped group text:
   and `0xFFFE` as firmware reserves them;
 - transport code slot 1 is 0, firmware's placeholder for the sender's home
   region.
+
+One caveat on "same message text": openHop Core strips trailing NULs before
+building the datagram, on this extension and on command 3 alike, whereas
+firmware passes the client's byte count through to `sendGroupMessage` and
+encrypts the NULs. A client that pads its text therefore gets a shorter
+ciphertext from openHop than from firmware. The decrypted string is the same
+either way, so this does not affect interoperability — but it means the RF
+bytes are identical only for text without trailing NULs.
 
 ## Relation to `CMD_SET_FLOOD_SCOPE` (54)
 

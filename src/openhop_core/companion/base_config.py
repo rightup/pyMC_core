@@ -415,9 +415,12 @@ class _DeviceConfigMixin:
         caller is expected to have run already; re-running it here is cheap and
         keeps the helper safe to call directly.
 
-        Marks the packet scope-applied on the same terms as its sibling, so the
-        dispatcher's node-level resolver cannot replace the decision downstream
-        (notably on a repeater, whose dispatcher scopes every flood it sends).
+        Marks the packet scope-applied on the same terms as its sibling. For a
+        packet that ends up scoped the mark is belt-and-braces -- the route is
+        now TRANSPORT_FLOOD and the dispatcher only re-scopes ROUTE_TYPE_FLOOD,
+        so the codes survive on that alone. It earns its keep by recording
+        *ownership*: it is what a later resolver, or a caller that resets the
+        route, reads to know this packet's scope was already decided here.
         """
         key = normalize_flood_scope_key(transport_key)
         if getattr(pkt, "_flood_scope_applied", False):

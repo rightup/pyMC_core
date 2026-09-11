@@ -36,6 +36,7 @@ from openhop_core.companion.constants import (
     OPENHOP_CHANNEL_TXT_SCOPED,
     OPENHOP_EXTENSION_MARKER,
     OPENHOP_SCOPE_PROBE_RESERVED_LEN,
+    OPENHOP_SCOPED_SEND_HEADER_LEN,
     PUB_KEY_SIZE,
     PUSH_CODE_ADVERT,
     PUSH_CODE_BINARY_RESPONSE,
@@ -68,6 +69,7 @@ from openhop_core.companion.constants import (
     RESP_CODE_TUNING_PARAMS,
     STATS_TYPE_PACKETS,
 )
+from openhop_core.companion import CompanionBridge
 from openhop_core.companion.frame_server import (
     CompanionFrameServer,
     _build_advert_push_frames,
@@ -80,6 +82,7 @@ from openhop_core.companion.models import (
     QueuedMessage,
     SentResult,
 )
+from openhop_core.protocol import LocalIdentity
 from openhop_core.protocol.packet_utils import PathUtils
 from openhop_core.protocol.transport_keys import get_auto_key_for
 
@@ -3991,3 +3994,50 @@ async def test_unknown_channel_txt_subtype_is_unsupported_without_rf(subtype):
 
     assert frames == [bytes([RESP_CODE_ERR, ERR_CODE_UNSUPPORTED_CMD])]
     bridge.send_channel_message.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_openhop_scoped_send_bad_key_outranks_unknown_channel():
+    """A frame wrong in two ways reports the argument error, not NOT_FOUND.
+
+    Key validation runs before the channel lookup so a client told NOT_FOUND
+    can trust that its channel is the only thing to fix.
+    """
+    server, frames, bridge = _ext_server(channel=False)
+
+    await server._cmd_send_channel_txt_msg(_scoped_payload(channel_idx=9, key=bytes(16)))
+
+    assert frames == [bytes([RESP_CODE_ERR, ERR_CODE_ILLEGAL_ARG])]
+    bridge.send_channel_message.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_openhop_scoped_send_rejects_minimum_length_boundary():
+    """23 bytes is a complete header with no text; 24 is the real minimum."""
+    server, frames, bridge = _ext_server()
+    header = bytes([OPENHOP_CHANNEL_TXT_SCOPED, 1]) + struct.pack("<I", 0) + _EXT_KEY
+    # 23-byte payload = command byte + the 22 bytes this handler receives.
+    assert len(header) == OPENHOP_SCOPED_SEND_HEADER_LEN
+    assert len(header) + 1 == 23
+
+    await server._cmd_send_channel_txt_msg(header)
+    assert frames == [bytes([RESP_CODE_ERR, ERR_CODE_ILLEGAL_ARG])]
+
+    frames.clear()
+    await server._cmd_send_channel_txt_msg(header + b"x")
+    assert frames == [bytes([RESP_CODE_OK])]
+
+
+@pytest.mark.asyncio
+async def test_openhop_probe_returns_exactly_32_public_key_bytes_from_real_bridge():
+    """Against a real companion, not a Mock, so the frame length is pinned."""
+    bridge = CompanionBridge(LocalIdentity(), AsyncMock(return_value=True), node_name="probe")
+    server, frames = _make_capture_server(bridge)
+
+    await server._cmd_send_channel_txt_msg(_probe_payload())
+
+    assert len(frames) == 1
+    assert frames[0][0] == RESP_CODE_OPENHOP_EXTENSION
+    assert frames[0][1:7] == OPENHOP_EXTENSION_MARKER
+    assert frames[0][7:] == bridge.get_public_key()
+    assert len(frames[0]) == 1 + 6 + PUB_KEY_SIZE
