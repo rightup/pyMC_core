@@ -16,6 +16,7 @@ from openhop_core.companion.constants import (
     CMD_HAS_CONNECTION,
     CMD_IMPORT_PRIVATE_KEY,
     CMD_LOGOUT,
+    CMD_SEND_CHANNEL_TXT_MSG,
     CMD_SET_ADVERT_NAME,
     CMD_SET_TUNING_PARAMS,
     CMD_SIGN_DATA,
@@ -27,9 +28,14 @@ from openhop_core.companion.constants import (
     ERR_CODE_TABLE_FULL,
     ERR_CODE_UNSUPPORTED_CMD,
     FRAME_OUTBOUND_PREFIX,
+    MAX_FRAME_SIZE,
     MAX_PATH_SIZE,
     MAX_PAYLOAD_SIZE,
     MAX_SIGN_DATA_SIZE,
+    OPENHOP_CHANNEL_SCOPE_PROBE,
+    OPENHOP_CHANNEL_TXT_SCOPED,
+    OPENHOP_EXTENSION_MARKER,
+    OPENHOP_SCOPE_PROBE_RESERVED_LEN,
     PUB_KEY_SIZE,
     PUSH_CODE_ADVERT,
     PUSH_CODE_BINARY_RESPONSE,
@@ -53,6 +59,7 @@ from openhop_core.companion.constants import (
     RESP_CODE_ERR,
     RESP_CODE_NO_MORE_MESSAGES,
     RESP_CODE_OK,
+    RESP_CODE_OPENHOP_EXTENSION,
     RESP_CODE_SELF_INFO,
     RESP_CODE_SENT,
     RESP_CODE_SIGN_START,
@@ -74,6 +81,7 @@ from openhop_core.companion.models import (
     SentResult,
 )
 from openhop_core.protocol.packet_utils import PathUtils
+from openhop_core.protocol.transport_keys import get_auto_key_for
 
 
 def test_build_advert_push_frames_short_only_when_no_name():
@@ -3782,3 +3790,204 @@ async def test_cmd_send_trace_path_bridge_exception_is_illegal_arg():
     server, frames = _make_capture_server(bridge)
     await server._cmd_send_trace_path(_trace_frame())
     assert frames == [bytes([RESP_CODE_ERR, ERR_CODE_ILLEGAL_ARG])]
+
+
+# ---------------------------------------------------------------------------
+# openHop extensions on CMD_SEND_CHANNEL_TXT_MSG (see docs/openhop-frame-extensions.md)
+# ---------------------------------------------------------------------------
+
+_EXT_PUBKEY = bytes(range(32))
+_EXT_KEY = get_auto_key_for("#USA")
+
+
+def _ext_server(send_result=True, channel=True):
+    """Capture server whose bridge accepts scoped channel sends."""
+    bridge = Mock()
+    bridge.get_public_key = Mock(return_value=_EXT_PUBKEY)
+    bridge.get_channel = Mock(
+        return_value=Channel(name="general", secret=bytes(16)) if channel else None
+    )
+    bridge.send_channel_message = AsyncMock(return_value=send_result)
+    server, frames = _make_capture_server(bridge)
+    return server, frames, bridge
+
+
+def _probe_payload(reserved=bytes(OPENHOP_SCOPE_PROBE_RESERVED_LEN)):
+    return bytes([OPENHOP_CHANNEL_SCOPE_PROBE]) + reserved
+
+
+def _scoped_payload(channel_idx=1, timestamp=1234, key=_EXT_KEY, text=b"hello"):
+    return (
+        bytes([OPENHOP_CHANNEL_TXT_SCOPED, channel_idx])
+        + struct.pack("<I", timestamp)
+        + key
+        + text
+    )
+
+
+@pytest.mark.asyncio
+async def test_openhop_scope_probe_returns_contract_marker_and_pubkey():
+    server, frames, _ = _ext_server()
+
+    await server._cmd_send_channel_txt_msg(_probe_payload())
+
+    assert frames == [
+        bytes([RESP_CODE_OPENHOP_EXTENSION]) + OPENHOP_EXTENSION_MARKER + _EXT_PUBKEY
+    ]
+    assert len(frames[0]) == 1 + 6 + PUB_KEY_SIZE
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "payload",
+    [
+        bytes([OPENHOP_CHANNEL_SCOPE_PROBE]) + bytes(4),  # short: caught by len < 6
+        bytes([OPENHOP_CHANNEL_SCOPE_PROBE]) + bytes(6),  # long
+        bytes([OPENHOP_CHANNEL_SCOPE_PROBE]) + b"\x00\x01\x00\x00\x00",  # reserved not zero
+    ],
+    ids=["short", "long", "dirty-reserved"],
+)
+async def test_openhop_scope_probe_malformed_is_illegal_arg(payload):
+    server, frames, bridge = _ext_server()
+
+    await server._cmd_send_channel_txt_msg(payload)
+
+    assert frames == [bytes([RESP_CODE_ERR, ERR_CODE_ILLEGAL_ARG])]
+    bridge.send_channel_message.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_openhop_scoped_send_delegates_key_and_timestamp():
+    server, frames, bridge = _ext_server()
+
+    await server._cmd_send_channel_txt_msg(_scoped_payload())
+
+    assert frames == [bytes([RESP_CODE_OK])]
+    bridge.send_channel_message.assert_awaited_once_with(
+        1, "hello", timestamp=1234, flood_scope_key=_EXT_KEY
+    )
+
+
+@pytest.mark.asyncio
+async def test_openhop_scoped_send_strips_trailing_nuls():
+    """Trailing NULs are command 3's C-string convention, not an error."""
+    server, frames, bridge = _ext_server()
+
+    await server._cmd_send_channel_txt_msg(_scoped_payload(text=b"hello\x00\x00"))
+
+    assert frames == [bytes([RESP_CODE_OK])]
+    assert bridge.send_channel_message.await_args.args[1] == "hello"
+
+
+@pytest.mark.asyncio
+async def test_openhop_scoped_send_unknown_channel_is_not_found():
+    server, frames, bridge = _ext_server(channel=False)
+
+    await server._cmd_send_channel_txt_msg(_scoped_payload(channel_idx=9))
+
+    assert frames == [bytes([RESP_CODE_ERR, ERR_CODE_NOT_FOUND])]
+    bridge.send_channel_message.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_openhop_scoped_send_failure_maps_to_not_found_like_cmd3():
+    server, frames, _ = _ext_server(send_result=False)
+
+    await server._cmd_send_channel_txt_msg(_scoped_payload())
+
+    assert frames == [bytes([RESP_CODE_ERR, ERR_CODE_NOT_FOUND])]
+
+
+@pytest.mark.asyncio
+async def test_openhop_scoped_send_value_error_maps_to_illegal_arg():
+    """An all-zero key reaches the bridge validator, not the radio."""
+    server, frames, bridge = _ext_server()
+    bridge.send_channel_message = AsyncMock(side_effect=ValueError("null key"))
+
+    await server._cmd_send_channel_txt_msg(_scoped_payload(key=bytes(16)))
+
+    assert frames == [bytes([RESP_CODE_ERR, ERR_CODE_ILLEGAL_ARG])]
+
+
+@pytest.mark.asyncio
+async def test_openhop_scoped_send_old_bridge_is_unsupported_not_unscoped():
+    """A bridge without the keyword must fail, never fall back to plain flood."""
+    server, frames, bridge = _ext_server()
+    bridge.send_channel_message = AsyncMock(side_effect=TypeError("unexpected keyword"))
+
+    await server._cmd_send_channel_txt_msg(_scoped_payload())
+
+    assert frames == [bytes([RESP_CODE_ERR, ERR_CODE_UNSUPPORTED_CMD])]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "payload",
+    [
+        bytes([OPENHOP_CHANNEL_TXT_SCOPED, 1]) + struct.pack("<I", 0) + _EXT_KEY[:8],
+        _scoped_payload(text=b""),
+        _scoped_payload(text=b"\x00\x00"),
+        _scoped_payload(text=b"hi\x00there"),
+        _scoped_payload(text=b"\xff\xfe"),
+        _scoped_payload(text=b"x" * 154),
+    ],
+    ids=["truncated-key", "empty-text", "only-nuls", "embedded-nul", "bad-utf8", "over-limit"],
+)
+async def test_openhop_scoped_send_rejects_malformed(payload):
+    server, frames, bridge = _ext_server()
+
+    await server._cmd_send_channel_txt_msg(payload)
+
+    assert frames == [bytes([RESP_CODE_ERR, ERR_CODE_ILLEGAL_ARG])]
+    bridge.send_channel_message.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_openhop_scoped_send_accepts_exact_frame_limit():
+    """153 text bytes is the largest payload that fits MAX_FRAME_SIZE."""
+    server, frames, bridge = _ext_server()
+    text = b"x" * 153
+    payload = _scoped_payload(text=text)
+    assert len(payload) + 1 == MAX_FRAME_SIZE
+
+    await server._cmd_send_channel_txt_msg(payload)
+
+    assert frames == [bytes([RESP_CODE_OK])]
+    assert bridge.send_channel_message.await_args.args[1] == text.decode()
+
+
+@pytest.mark.asyncio
+async def test_openhop_extensions_reachable_through_command_dispatch():
+    """The subtypes ride command 3, so they must arrive via _handle_cmd."""
+    server, frames, bridge = _ext_server()
+
+    await server._handle_cmd(bytes([CMD_SEND_CHANNEL_TXT_MSG]) + _probe_payload())
+    await server._handle_cmd(bytes([CMD_SEND_CHANNEL_TXT_MSG]) + _scoped_payload())
+
+    assert frames[0][0] == RESP_CODE_OPENHOP_EXTENSION
+    assert frames[1] == bytes([RESP_CODE_OK])
+    bridge.send_channel_message.assert_awaited_once_with(
+        1, "hello", timestamp=1234, flood_scope_key=_EXT_KEY
+    )
+
+
+@pytest.mark.asyncio
+async def test_plain_channel_txt_send_is_unchanged_by_extensions():
+    """Subtype 0 must not acquire a flood_scope_key kwarg."""
+    server, frames, bridge = _ext_server()
+
+    await server._cmd_send_channel_txt_msg(bytes([0, 1]) + struct.pack("<I", 1234) + b"hello")
+
+    assert frames == [bytes([RESP_CODE_OK])]
+    bridge.send_channel_message.assert_awaited_once_with(1, "hello", timestamp=1234)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("subtype", [0x04, 0x7F, 0x82, 0xFF])
+async def test_unknown_channel_txt_subtype_is_unsupported_without_rf(subtype):
+    server, frames, bridge = _ext_server()
+
+    await server._cmd_send_channel_txt_msg(bytes([subtype, 1]) + struct.pack("<I", 0) + b"x")
+
+    assert frames == [bytes([RESP_CODE_ERR, ERR_CODE_UNSUPPORTED_CMD])]
+    bridge.send_channel_message.assert_not_awaited()
