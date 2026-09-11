@@ -329,3 +329,34 @@ OUT_PATH_UNKNOWN = 0xFF
 # ---------------------------------------------------------------------------
 PUBLIC_GROUP_PSK = b"izOH6cXN6mrJ5e26oRXNcg=="
 DEFAULT_PUBLIC_CHANNEL_SECRET = base64.b64decode(PUBLIC_GROUP_PSK)
+
+# ===========================================================================
+# OpenHop Frame extensions
+# ---------------------------------------------------------------------------
+# These are NOT part of the upstream MeshCore companion protocol. They ride on
+# CMD_SEND_CHANNEL_TXT_MSG's txt_type byte with the high bit set, so a firmware
+# companion -- or any Core build predating them -- answers
+# ERR_CODE_UNSUPPORTED_CMD from its existing "txt_type != TXT_TYPE_PLAIN" branch
+# and never reaches RF. FIRMWARE_VER_CODE deliberately does not move for these:
+# it states MeshCore companion-protocol compatibility, which is unchanged.
+# Clients must negotiate with OPENHOP_CHANNEL_SCOPE_PROBE before using them.
+# Wire layouts: docs/openhop-frame-extensions.md
+# ===========================================================================
+
+# txt_type subtype: per-message flood scope override on a channel text send.
+OPENHOP_CHANNEL_TXT_SCOPED = 0x80
+# txt_type subtype: capability probe for the extensions above.
+OPENHOP_CHANNEL_SCOPE_PROBE = 0x81
+# Response code for a capability-probe reply. Clear of both the firmware
+# RESP_CODE_* range (0..28) and the PUSH_CODE_* range (0x80..0x90).
+RESP_CODE_OPENHOP_EXTENSION = 0xF0
+# Contract marker returned by the probe. Bump the digit for any incompatible
+# change to the byte layouts; a client must see this exact value before
+# sending OPENHOP_CHANNEL_TXT_SCOPED.
+OPENHOP_EXTENSION_MARKER = b"OHREG2"
+# Reserved bytes that pad a probe out to command 3's minimum parse length, so a
+# server without these extensions still reads it as a well-formed command 3.
+OPENHOP_SCOPE_PROBE_RESERVED_LEN = 5
+# Fixed header of a scoped send, after the command byte:
+#   subtype(1) + channel_idx(1) + timestamp(4) + transport key(16)
+OPENHOP_SCOPED_SEND_HEADER_LEN = 22

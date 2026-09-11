@@ -24,6 +24,37 @@ from .models import NodePrefs
 
 logger = logging.getLogger("CompanionBase")
 
+FLOOD_SCOPE_KEY_SIZE = 16
+
+
+def normalize_flood_scope_key(transport_key) -> bytes:
+    """Validate an explicit per-message flood scope key and return it as bytes.
+
+    Raises ``ValueError`` for anything that is not exactly
+    ``FLOOD_SCOPE_KEY_SIZE`` non-zero bytes. Callers must invoke this *before*
+    entering any ``try``/``except Exception`` that converts failures into a
+    falsey send result, so that a malformed key is reported to the caller as an
+    argument error rather than as an ordinary transmit failure.
+
+    The all-zero key is rejected rather than treated as firmware's
+    ``TransportKey::isNull()`` (which means "send plain flood"). An explicit
+    per-message override has no reason to carry the null key, so the zeros are
+    far likelier to be an uninitialised buffer than a deliberate request; the
+    firmware-equivalent "unscoped" behaviour is reached by omitting the
+    override, or by ``set_flood_unscoped()``.
+    """
+    if transport_key is None:
+        raise ValueError("flood scope key must not be None")
+    try:
+        key = bytes(transport_key)
+    except TypeError as exc:
+        raise ValueError(f"flood scope key must be bytes-like: {exc}") from exc
+    if len(key) != FLOOD_SCOPE_KEY_SIZE:
+        raise ValueError(f"flood scope key must be {FLOOD_SCOPE_KEY_SIZE} bytes, got {len(key)}")
+    if key == ZERO_FLOOD_SCOPE_KEY:
+        raise ValueError("flood scope key must not be all zeros (MeshCore reserves the null key)")
+    return key
+
 
 class _DeviceConfigMixin:
     """Part of :class:`CompanionBase` (see companion_base.py)."""
@@ -367,6 +398,37 @@ class _DeviceConfigMixin:
         if effective_key is None:
             return
         self._scope_packet(pkt, effective_key)
+
+    def _apply_explicit_flood_scope(self, pkt: Packet, transport_key) -> None:
+        """Scope one packet with a caller-supplied key, ignoring node scope state.
+
+        The per-message counterpart to :meth:`_apply_flood_scope`: it takes the
+        place of the whole resolution chain (force-unscoped flag, transient
+        override, persisted default) for this packet only, and touches no stored
+        state. Firmware has no equivalent -- ``MyMesh::sendFloodScoped`` reads
+        ``send_unscoped``/``send_scope``/``default_scope_key``, with a
+        ``// TODO: have per-channel send_scope`` where this would go -- so the
+        RF result is exactly what firmware emits for
+        ``sendFloodScoped(scope, pkt)`` once a scope has been resolved.
+
+        The key is validated by :func:`normalize_flood_scope_key`, which the
+        caller is expected to have run already; re-running it here is cheap and
+        keeps the helper safe to call directly.
+
+        Marks the packet scope-applied on the same terms as its sibling. For a
+        packet that ends up scoped the mark is belt-and-braces -- the route is
+        now TRANSPORT_FLOOD and the dispatcher only re-scopes ROUTE_TYPE_FLOOD,
+        so the codes survive on that alone. It earns its keep by recording
+        *ownership*: it is what a later resolver, or a caller that resets the
+        route, reads to know this packet's scope was already decided here.
+        """
+        key = normalize_flood_scope_key(transport_key)
+        if getattr(pkt, "_flood_scope_applied", False):
+            return
+        if pkt.get_route_type() != ROUTE_TYPE_FLOOD:
+            return  # only scope plain floods, exactly as _apply_flood_scope does
+        pkt._flood_scope_applied = True
+        self._scope_packet(pkt, key)
 
     def _apply_default_flood_scope(self, pkt: Packet) -> None:
         """Scope a flood packet with the persisted default scope only.

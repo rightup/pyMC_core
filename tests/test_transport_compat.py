@@ -14,8 +14,19 @@ the algorithm is correct.  If not, there is a firmware-compatibility bug.
 
 from __future__ import annotations
 
-from openhop_core.protocol import Packet
-from openhop_core.protocol.transport_keys import calc_transport_code, get_auto_key_for
+import hashlib
+import hmac
+import struct
+
+import pytest
+
+from openhop_core.protocol import Packet, transport_keys
+from openhop_core.protocol.constants import ROUTE_TYPE_FLOOD, ROUTE_TYPE_TRANSPORT_FLOOD
+from openhop_core.protocol.transport_keys import (
+    calc_transport_code,
+    get_auto_key_for,
+    scope_packet,
+)
 
 # Raw GRP_TXT packet bytes captured from a firmware companion radio, region #nl-li.
 # Packet structure (TRANSPORT_FLOOD, path_len=0):
@@ -200,3 +211,126 @@ class TestTransportCodeDetails:
         assert (
             key == expected_full
         ), f"Key mismatch:\n  got      {key.hex()}\n  expected {expected_full.hex()}"
+
+
+# ---------------------------------------------------------------------------
+# Scoped GRP_TXT vectors, checked against an independent implementation
+# ---------------------------------------------------------------------------
+#
+# The tests above prove `calc_transport_code` reproduces one real firmware
+# capture. That is a single point, and it compares a helper against a captured
+# byte rather than against the algorithm: a change that broke, say, only the
+# reserved-value mapping or only uppercase names would still pass it.
+#
+# `_cpp_*` below re-implement TransportKeyStore::getAutoKeyFor and
+# TransportKey::calcTransportCode straight from the C++, using nothing from
+# openhop_core. They are anchored by `test_reference_impl_reproduces_capture`,
+# which shows the reference reproduces the same firmware capture the suite is
+# built on -- so the vectors it generates for regions we have no capture for
+# (notably an uppercase public region) carry that capture's authority.
+
+
+def _cpp_get_auto_key_for(name: str) -> bytes:
+    """MeshCore TransportKeyStore::getAutoKeyFor -- SHA-256(name)[:16]."""
+    return hashlib.sha256(name.encode("ascii")).digest()[:16]
+
+
+def _cpp_calc_transport_code(key: bytes, payload_type: int, payload: bytes) -> int:
+    """MeshCore TransportKey::calcTransportCode.
+
+    HMAC-SHA256 over payload_type || payload, first two bytes read as a
+    little-endian uint16 (Arduino endianness), with 0x0000 and 0xFFFF reserved.
+    """
+    digest = hmac.new(key, bytes([payload_type]) + payload, hashlib.sha256).digest()
+    code = struct.unpack("<H", digest[:2])[0]
+    if code == 0:
+        return 1
+    if code == 0xFFFF:
+        return 0xFFFE
+    return code
+
+
+# Frozen vectors over the captured firmware GRP_TXT payload above.
+# #USA and #usa are deliberately both present: they are different MeshCore
+# regions and must never produce the same key or code.
+SCOPED_VECTORS = [
+    ("#nl-li", "CE657DA0691CD4706A1435A950BC3D8B", 0xFBE5),
+    ("#USA", "5EAF24A29D2936601E22AC56065CB314", 0xE46D),
+    ("#usa", "418F6396CEA59E2CC79F06D1566EEC31", 0xF07F),
+]
+
+
+def _captured_grp_txt():
+    pkt = Packet()
+    assert pkt.read_from(bytes.fromhex(FIRMWARE_HEX))
+    return pkt
+
+
+class TestScopedGrpTxtVectors:
+    def test_reference_impl_reproduces_capture(self):
+        """Anchor: the from-scratch C++ port matches the real firmware bytes."""
+        pkt = _captured_grp_txt()
+        code = _cpp_calc_transport_code(
+            _cpp_get_auto_key_for(REGION), pkt.get_payload_type(), bytes(pkt.get_payload())
+        )
+        assert code == EXPECTED_FIRMWARE_CODE
+
+    @pytest.mark.parametrize("region,key_hex,code", SCOPED_VECTORS, ids=lambda v: str(v))
+    def test_vector_matches_reference_and_helpers(self, region, key_hex, code):
+        pkt = _captured_grp_txt()
+        expected_key = bytes.fromhex(key_hex)
+
+        # The frozen vector is what the C++ algorithm produces...
+        assert _cpp_get_auto_key_for(region) == expected_key
+        assert (
+            _cpp_calc_transport_code(expected_key, pkt.get_payload_type(), bytes(pkt.get_payload()))
+            == code
+        )
+        # ...and what openhop_core produces.
+        assert get_auto_key_for(region) == expected_key
+        assert calc_transport_code(expected_key, pkt) == code
+
+    def test_uppercase_and_lowercase_region_are_distinct(self):
+        """A client that case-folds a region name sends to the wrong mesh."""
+        pkt = _captured_grp_txt()
+        upper, lower = get_auto_key_for("#USA"), get_auto_key_for("#usa")
+
+        assert upper != lower
+        assert calc_transport_code(upper, pkt) != calc_transport_code(lower, pkt)
+
+    def test_scoped_send_emits_the_vector(self):
+        """End to end: the explicit override puts the vector's code on the wire.
+
+        Rebuilds the captured packet's route/codes the way
+        ``_apply_explicit_flood_scope`` does, so the full chain -- key, HMAC,
+        endianness, reserved values, route-type bits -- is asserted against a
+        firmware-anchored literal rather than against another helper.
+        """
+        pkt = _captured_grp_txt()
+        pkt.header = (pkt.header & ~0x03) | ROUTE_TYPE_FLOOD
+        pkt.transport_codes = [0, 0]
+
+        scope_packet(pkt, bytes.fromhex("5EAF24A29D2936601E22AC56065CB314"))
+
+        assert pkt.get_route_type() == ROUTE_TYPE_TRANSPORT_FLOOD
+        assert pkt.transport_codes[0] == 0xE46D
+        assert pkt.transport_codes[1] == 0
+
+    @pytest.mark.parametrize(
+        "digest_head,expected",
+        [(b"\x00\x00", 0x0001), (b"\xff\xff", 0xFFFE)],
+        ids=["null-code", "broadcast-code"],
+    )
+    def test_reserved_codes_are_mapped_away(self, monkeypatch, digest_head, expected):
+        """0x0000 and 0xFFFF are reserved; firmware substitutes 0x0001/0xFFFE.
+
+        No region name is known to hash onto either, so the HMAC is forced to
+        land there -- otherwise this branch of calc_transport_code is never run.
+        """
+        monkeypatch.setattr(
+            transport_keys.CryptoUtils,
+            "_hmac_sha256",
+            staticmethod(lambda key, data: digest_head + bytes(30)),
+        )
+
+        assert calc_transport_code(get_auto_key_for("#USA"), _captured_grp_txt()) == expected

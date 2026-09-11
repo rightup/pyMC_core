@@ -16,6 +16,7 @@
 - [Node Usage Guide](https://docs.openhop.dev/projects/openhop-core/node-usage/) - Guide for using MeshNode
 - [Examples](https://docs.openhop.dev/projects/openhop-core/examples/) - Working code examples
 - [API Reference](https://docs.openhop.dev/projects/openhop-core/api-reference/) - Detailed API documentation
+- [openHop Frame extensions](docs/openhop-frame-extensions.md) - Companion frames that are openHop-specific, not MeshCore
 
 ## Quick Start
 

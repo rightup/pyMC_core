@@ -8,6 +8,7 @@ import struct
 from ...protocol.cayenne_lpp import TELEM_CHANNEL_SELF, encode_voltage
 from ...protocol.constants import TELEM_PERM_BASE, TELEM_PERM_ENVIRONMENT, TELEM_PERM_LOCATION
 from ...protocol.packet_utils import PathUtils
+from ..base_config import normalize_flood_scope_key
 from ..constants import (
     ERR_CODE_BAD_STATE,
     ERR_CODE_ILLEGAL_ARG,
@@ -17,8 +18,14 @@ from ..constants import (
     FIRMWARE_VER_CODE,
     LOGIN_TIMEOUT_HINT_MS,
     MAX_CHANNEL_DATA_LENGTH,
+    MAX_FRAME_SIZE,
     MAX_GROUP_DATA_LENGTH,
     MAX_PATH_SIZE,
+    OPENHOP_CHANNEL_SCOPE_PROBE,
+    OPENHOP_CHANNEL_TXT_SCOPED,
+    OPENHOP_EXTENSION_MARKER,
+    OPENHOP_SCOPE_PROBE_RESERVED_LEN,
+    OPENHOP_SCOPED_SEND_HEADER_LEN,
     OUT_PATH_UNKNOWN,
     PUB_KEY_SIZE,
     PUSH_CODE_LOGIN_FAIL,
@@ -31,6 +38,7 @@ from ..constants import (
     RESP_CODE_CONTACT_MSG_RECV,
     RESP_CODE_CONTACT_MSG_RECV_V3,
     RESP_CODE_NO_MORE_MESSAGES,
+    RESP_CODE_OPENHOP_EXTENSION,
     STATUS_TIMEOUT_HINT_MS,
     TELEMETRY_TIMEOUT_HINT_MS,
     TXT_MSG_TIMEOUT_HINT_MS,
@@ -130,22 +138,127 @@ class _MessagingCommandsMixin:
             self._write_err(ERR_CODE_TABLE_FULL)
 
     async def _cmd_send_channel_txt_msg(self, data: bytes) -> None:
+        """Dispatch CMD_SEND_CHANNEL_TXT_MSG (3) on its txt_type byte.
+
+        ``TXT_TYPE_PLAIN`` is the firmware command and is handled byte-for-byte
+        as before. Two high-bit subtypes are OpenHop extensions (see
+        ``docs/openhop-frame-extensions.md``); every other value keeps
+        firmware's ERR_CODE_UNSUPPORTED_CMD, which is also what a firmware
+        companion answers to the extension subtypes themselves.
+        """
         if len(data) < 6:
             self._write_err(ERR_CODE_ILLEGAL_ARG)
             return
         txt_type = data[0]
+        if txt_type == OPENHOP_CHANNEL_SCOPE_PROBE:
+            self._openhop_channel_scope_probe(data)
+            return
+        if txt_type == OPENHOP_CHANNEL_TXT_SCOPED:
+            await self._openhop_send_channel_txt_scoped(data)
+            return
+        if txt_type != TXT_TYPE_PLAIN:
+            self._write_err(ERR_CODE_UNSUPPORTED_CMD)
+            return
         channel_idx = data[1]
         msg_timestamp = struct.unpack("<I", data[2:6])[0]
         text = data[6:].decode("utf-8", errors="replace").rstrip("\x00")
-        if txt_type != 0:
-            self._write_err(ERR_CODE_UNSUPPORTED_CMD)
-            return
         if self.bridge.get_channel(channel_idx) is None:
             self._write_err(ERR_CODE_NOT_FOUND)
             return
         ok = await self.bridge.send_channel_message(channel_idx, text, timestamp=msg_timestamp)
         # Firmware reports any channel-send failure as NOT_FOUND (MyMesh.cpp
         # CMD_SEND_CHANNEL_TXT_MSG), so strictly-compatible clients expect it.
+        self._write_ok() if ok else self._write_err(ERR_CODE_NOT_FOUND)
+
+    # -- OpenHop extensions to command 3 -------------------------------------
+    # Not MeshCore protocol. Kept on command 3 so that a server without them
+    # rejects the unknown txt_type from its existing branch, without RF.
+
+    def _openhop_channel_scope_probe(self, data: bytes) -> None:
+        """Answer the capability probe: [0xF0][OHREG2][32-byte public key].
+
+        The reserved tail is required to be present and zero so the probe is
+        also a well-formed command 3 for a server that does not know it, and so
+        the bytes stay available for a later revision of the contract.
+        """
+        if len(data) != 1 + OPENHOP_SCOPE_PROBE_RESERVED_LEN or any(data[1:]):
+            self._write_err(ERR_CODE_ILLEGAL_ARG)
+            return
+        self._write_frame(
+            bytes([RESP_CODE_OPENHOP_EXTENSION])
+            + OPENHOP_EXTENSION_MARKER
+            + self.bridge.get_public_key()
+        )
+
+    async def _openhop_send_channel_txt_scoped(self, data: bytes) -> None:
+        """Send one channel text message under a caller-supplied transport key.
+
+        Payload after the command byte:
+          subtype(1) channel_idx(1) timestamp(4) transport_key(16) text(1..)
+
+        The key overrides this node's flood scope for this message only. Only
+        the envelope is parsed here: encryption, the ``"<sender>: "`` prefix and
+        its firmware-compatible truncation, echo tracking and packet injection
+        all stay in the shared send path, so scoped and plain sends differ on
+        the wire in nothing but the route type and transport codes.
+        """
+        # Defensive: a conforming client cannot exceed the frame limit, but the
+        # cap is what bounds the text and it costs nothing to state it here.
+        if len(data) + 1 > MAX_FRAME_SIZE:
+            self._write_err(ERR_CODE_ILLEGAL_ARG)
+            return
+        if len(data) <= OPENHOP_SCOPED_SEND_HEADER_LEN:
+            # Header complete but no text, or a truncated header/key.
+            self._write_err(ERR_CODE_ILLEGAL_ARG)
+            return
+        channel_idx = data[1]
+        msg_timestamp = struct.unpack("<I", data[2:6])[0]
+        # Trailing NULs are the C-string convention command 3 already accepts;
+        # an *embedded* NUL would be silently truncated by such a client, so the
+        # extension rejects it rather than sending something else's bytes.
+        raw_text = data[OPENHOP_SCOPED_SEND_HEADER_LEN:].rstrip(b"\x00")
+        if not raw_text or b"\x00" in raw_text:
+            self._write_err(ERR_CODE_ILLEGAL_ARG)
+            return
+        try:
+            text = raw_text.decode("utf-8")
+        except UnicodeDecodeError:
+            # Stricter than command 3's errors="replace": a new contract can
+            # afford to tell the client its bytes were wrong.
+            self._write_err(ERR_CODE_ILLEGAL_ARG)
+            return
+        # Validated before the channel lookup so that every malformed argument
+        # answers ILLEGAL_ARG. Deferring it to the bridge would let a frame that
+        # is bad in two ways at once (unknown channel *and* a null key) report
+        # NOT_FOUND, telling the client to fix the channel when the key is
+        # wrong too.
+        try:
+            scope_key = normalize_flood_scope_key(data[6:OPENHOP_SCOPED_SEND_HEADER_LEN])
+        except ValueError:
+            self._write_err(ERR_CODE_ILLEGAL_ARG)
+            return
+        if self.bridge.get_channel(channel_idx) is None:
+            self._write_err(ERR_CODE_NOT_FOUND)
+            return
+        try:
+            ok = await self.bridge.send_channel_message(
+                channel_idx,
+                text,
+                timestamp=msg_timestamp,
+                flood_scope_key=scope_key,
+            )
+        except ValueError:
+            # Already validated above; kept because the bridge owns key policy
+            # and may grow rules this handler does not know about.
+            self._write_err(ERR_CODE_ILLEGAL_ARG)
+            return
+        except TypeError:
+            # Bridge predates the keyword; report it as unsupported rather than
+            # retrying unscoped, which would send to the wrong region silently.
+            logger.warning("Bridge does not support scoped channel sends")
+            self._write_err(ERR_CODE_UNSUPPORTED_CMD)
+            return
+        # Same failure mapping as command 3, so one client path handles both.
         self._write_ok() if ok else self._write_err(ERR_CODE_NOT_FOUND)
 
     async def _cmd_send_channel_data(self, data: bytes) -> None:

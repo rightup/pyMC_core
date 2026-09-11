@@ -28,6 +28,7 @@ from ..protocol.constants import (
     TELEM_PERM_BASE,
 )
 from ..protocol.packet_utils import PathUtils
+from .base_config import normalize_flood_scope_key
 from .base_support import ResponseWaiter, _fmt_path, _fmt_path_len, adv_type_to_flags
 from .constants import (
     ADV_TYPE_NONE,
@@ -473,9 +474,33 @@ class _SendOpsMixin:
             return SentResult(success=False)
 
     async def send_channel_message(
-        self, channel_idx: int, text: str, timestamp: Optional[int] = None
+        self,
+        channel_idx: int,
+        text: str,
+        timestamp: Optional[int] = None,
+        *,
+        flood_scope_key: Optional[bytes] = None,
     ) -> bool:
-        """Send a message to a channel."""
+        """Send a message to a channel.
+
+        ``flood_scope_key`` overrides the flood scope for this one message. With
+        ``None`` (the default) the node's own resolution applies, unchanged:
+        force-unscoped flag, then transient override, then persisted default,
+        then plain flood. A 16-byte non-null key replaces all of that for this
+        packet and this packet only -- no node, dispatcher or preference state
+        is read or written, so concurrent sends cannot see each other's scope.
+
+        Raises ``ValueError`` for a key that is not exactly 16 non-zero bytes.
+        That check runs before any packet is built and outside the send's
+        exception handling, so a bad key surfaces as an argument error rather
+        than as the ``False`` that means "transmit failed".
+        """
+        if flood_scope_key is not None:
+            # Validated out here on purpose: the try below turns every exception
+            # into `return False`, which would hide a malformed key behind an
+            # ordinary send failure and leave callers (the Frame extension
+            # included) unable to tell the two apart.
+            flood_scope_key = normalize_flood_scope_key(flood_scope_key)
         channel = self.channels.get(channel_idx)
         if not channel:
             logger.warning("Channel %s not found", channel_idx)
@@ -489,7 +514,12 @@ class _SendOpsMixin:
                 channels_config=self.channels.get_channels(),
                 timestamp=timestamp,
             )
-            self._apply_flood_scope(pkt)
+            # Attached to the freshly built packet with no await in between, so
+            # the override travels with this packet rather than with the node.
+            if flood_scope_key is None:
+                self._apply_flood_scope(pkt)
+            else:
+                self._apply_explicit_flood_scope(pkt, flood_scope_key)
             self._apply_path_hash_mode(pkt)
             # Record before awaiting the transport because Repeater can queue
             # a local transmission back through its companion bridges first.
